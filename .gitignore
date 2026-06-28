@@ -17,4 +17,6 @@ rsrc_windows_*
 server.crt
 server.key
 .quietforge/
+!.quietforge/config.json.example
+test-repo/
 original/
