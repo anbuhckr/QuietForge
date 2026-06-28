@@ -1,0 +1,9 @@
+{
+  "api_key": "sk-or-v1-...",
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "google/gemini-2.5-pro",
+  "disable_vision": false,
+  "password": "optional_secure_password",
+  "ssl_cert": "",
+  "ssl_key": ""
+}
