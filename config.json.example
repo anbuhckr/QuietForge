@@ -5,5 +5,18 @@
   "disable_vision": false,
   "password": "optional_secure_password",
   "ssl_cert": "",
-  "ssl_key": ""
+  "ssl_key": "",
+  "mcp": {
+    "servers": {
+      "example-mcp-server": {
+        "type": "local",
+        "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+        "cwd": ".",
+        "environment": {
+          "EXAMPLE_KEY": "optional_env_vars"
+        },
+        "disabled": false
+      }
+    }
+  }
 }
