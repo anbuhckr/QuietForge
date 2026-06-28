@@ -10,6 +10,7 @@ venv/
 # QuietForge local files
 make_icon.py
 quietforge.exe
+quietforge.exe~
 quietforge
 quietforge.db*
 quietforge_projects.json
@@ -19,3 +20,4 @@ server.key
 .quietforge/
 test-repo/
 original/
+scratch/
