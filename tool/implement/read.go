@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"quietforge/tool"
 	"quietforge/util"
-	"sort"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -68,21 +67,37 @@ func (t *ReadTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		if err != nil {
 			return nil, err
 		}
-		var list []string
+		type DirEntry struct {
+			Name      string `json:"name"`
+			IsDir     bool   `json:"is_dir"`
+			SizeBytes int64  `json:"size_bytes"`
+		}
+		var list []DirEntry
 		for _, e := range entries {
 			name := e.Name()
 			if strings.HasPrefix(name, "__pycache__") {
 				continue
 			}
-			if e.IsDir() {
-				name += "/"
+			info, err := e.Info()
+			size := int64(0)
+			if err == nil && !e.IsDir() {
+				size = info.Size()
 			}
-			list = append(list, name)
+			list = append(list, DirEntry{
+				Name:      name,
+				IsDir:     e.IsDir(),
+				SizeBytes: size,
+			})
 		}
-		sort.Strings(list)
+		
+		if list == nil {
+			list = []DirEntry{}
+		}
+		
+		b, _ := json.Marshal(list)
 		return &tool.ToolResult{
 			Title:  fmt.Sprintf("Directory: %s", path),
-			Output: strings.Join(list, "\n"),
+			Output: string(b),
 		}, nil
 	}
 

@@ -1,6 +1,12 @@
 package agent
 
-import "strings"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+)
 
 type AgentDefinition struct {
 	ID                   string
@@ -113,8 +119,60 @@ var BuiltinAgents = map[string]*AgentDefinition{
 	},
 }
 
+var (
+	customAgentsMu sync.RWMutex
+	customAgents   = make(map[string]*AgentDefinition)
+)
+
+func LoadCustomAgents(workspace string) error {
+	agentsPath := filepath.Join(workspace, ".quietforge", "agents.json")
+	b, err := os.ReadFile(agentsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var list []*AgentDefinition
+	if err := json.Unmarshal(b, &list); err != nil {
+		return err
+	}
+
+	customAgentsMu.Lock()
+	defer customAgentsMu.Unlock()
+	for _, a := range list {
+		customAgents[a.ID] = a
+	}
+	return nil
+}
+
+func SaveCustomAgent(workspace string, def *AgentDefinition) error {
+	customAgentsMu.Lock()
+	customAgents[def.ID] = def
+
+	var list []*AgentDefinition
+	for _, a := range customAgents {
+		list = append(list, a)
+	}
+	customAgentsMu.Unlock()
+
+	b, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	agentsDir := filepath.Join(workspace, ".quietforge")
+	os.MkdirAll(agentsDir, 0755)
+	return os.WriteFile(filepath.Join(agentsDir, "agents.json"), b, 0644)
+}
+
 func GetAgent(id string) *AgentDefinition {
 	if agent, ok := BuiltinAgents[id]; ok {
+		return agent
+	}
+	customAgentsMu.RLock()
+	defer customAgentsMu.RUnlock()
+	if agent, ok := customAgents[id]; ok {
 		return agent
 	}
 	return nil

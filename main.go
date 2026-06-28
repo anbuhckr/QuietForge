@@ -447,6 +447,7 @@ func unsubscribe(ch chan map[string]any) {
 
 func initWorkspace(path string) {
 	os.MkdirAll(path, 0755)
+	agent.LoadCustomAgents(path)
 	os.MkdirAll(filepath.Join(path, ".agent"), 0755)
 
 	gitDir := filepath.Join(path, ".git")
@@ -827,6 +828,7 @@ func registerTools() {
 		&impl.AstSearchTool{},
 		&impl.RevertTool{},
 		&impl.PlanExitTool{},
+		&impl.DefineSubagentTool{},
 		&impl.WriteArtifactTool{},
 		&impl.InvalidTool{},
 	} {
@@ -2662,7 +2664,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					addLiveEvent("activity", map[string]any{"event": "⚠️ Context Window Exceeded! Auto-compacting history to recover..."})
 					hist := activeSession.GetHistory()
 					if len(hist) > 1 {
-						pruned := session.PruneMessages(hist, 4000)
+						pruned := session.PruneMessages(hist, configToDict(appCfg), 4000)
 						if len(pruned) < len(hist) {
 							activeSession.ReplaceMessages(pruned)
 							activeSession.Save()

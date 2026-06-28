@@ -161,6 +161,11 @@ func parseConfig(data map[string]any) Config {
 		} else {
 			cc.Prune = true
 		}
+		if trunc, ok := compactionRaw["tool_truncation_limit"].(float64); ok {
+			cc.ToolTruncationLimit = int(trunc)
+		} else {
+			cc.ToolTruncationLimit = 2000
+		}
 		cfg.Compaction = &cc
 	}
 

@@ -70,7 +70,7 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 	}
 
 	if enabled, ok := compactCfg["enabled"].(bool); !ok || enabled {
-		history = CompactMessages(ctx, history, modelContext, client, onProgress)
+		history = CompactMessages(ctx, history, compactCfg, modelContext, client, onProgress)
 	}
 
 	systemMsg := Message{

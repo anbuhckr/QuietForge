@@ -43,6 +43,7 @@ type CompactionConfig struct {
 	PreserveRecentTokens int  `json:"preserve_recent_tokens"`
 	Reserved             int  `json:"reserved"`
 	Prune                bool `json:"prune"`
+	ToolTruncationLimit  int  `json:"tool_truncation_limit"`
 }
 
 // McpServerConfig and McpConfig define Model Context Protocol servers.

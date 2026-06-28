@@ -109,16 +109,13 @@ func (t *GlobTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 	}
 
 	sort.Strings(matches)
-	if len(matches) > 200 {
-		matches = matches[:200]
-	}
-
 	if len(matches) == 0 {
-		return &tool.ToolResult{Output: "(no matches)"}, nil
+		matches = []string{}
 	}
 
+	b, _ := json.Marshal(matches)
 	return &tool.ToolResult{
-		Title:  fmt.Sprintf("Found %d file(s)", len(matches)),
-		Output: strings.Join(matches, "\n"),
+		Title:  fmt.Sprintf("Glob: %s", params.Pattern),
+		Output: string(b),
 	}, nil
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -116,12 +117,45 @@ func (t *GrepTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 	}
 
 	lines := strings.Split(output, "\n")
-	if len(lines) > 200 {
-		output = strings.Join(lines[:200], "\n") + fmt.Sprintf("\n\n... [%d more matches omitted. Try making your regex more specific!] ...", len(lines)-200)
+	
+	type GrepMatch struct {
+		File    string `json:"file"`
+		Line    int    `json:"line"`
+		Content string `json:"content"`
 	}
+	
+	var matches []GrepMatch
+	for _, l := range lines {
+		// handle C:\path:line:content for windows
+		parts := strings.Split(l, ":")
+		if len(parts) >= 3 {
+			filePart := parts[0]
+			lineIdx := 1
+			if len(parts[0]) == 1 && len(parts) >= 4 { // likely Windows drive letter
+				filePart = parts[0] + ":" + parts[1]
+				lineIdx = 2
+			}
+			
+			lineNum, err := strconv.Atoi(parts[lineIdx])
+			if err == nil {
+				content := strings.Join(parts[lineIdx+1:], ":")
+				matches = append(matches, GrepMatch{
+					File:    filePart,
+					Line:    lineNum,
+					Content: content,
+				})
+			}
+		}
+	}
+	
+	if matches == nil {
+		matches = []GrepMatch{}
+	}
+	
+	b, _ := json.Marshal(matches)
 
 	return &tool.ToolResult{
 		Title:  fmt.Sprintf("Grep: %s", params.Pattern),
-		Output: output,
+		Output: string(b),
 	}, nil
 }

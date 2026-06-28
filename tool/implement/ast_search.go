@@ -115,8 +115,13 @@ func (t *AstSearchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		}, nil
 	}
 
-	var outputLines []string
-	outputLines = append(outputLines, fmt.Sprintf("Found %d exact matches for '%s':\n", len(matches), symbol))
+	type astMatchJson struct {
+		File      string `json:"file"`
+		StartLine int    `json:"start_line"`
+		EndLine   int    `json:"end_line"`
+		Snippet   string `json:"snippet"`
+	}
+	var jsonMatches []astMatchJson
 	for _, m := range matches {
 		relPath := m.FilePath
 		if ctx.Workspace != "" {
@@ -124,15 +129,23 @@ func (t *AstSearchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 				relPath = r
 			}
 		}
-		outputLines = append(outputLines, fmt.Sprintf("File: %s (Lines %d-%d)", relPath, m.StartLine, m.EndLine))
-		outputLines = append(outputLines, "```")
-		outputLines = append(outputLines, m.Snippet)
-		outputLines = append(outputLines, "```\n")
+		jsonMatches = append(jsonMatches, astMatchJson{
+			File:      relPath,
+			StartLine: m.StartLine,
+			EndLine:   m.EndLine,
+			Snippet:   m.Snippet,
+		})
 	}
+
+	if jsonMatches == nil {
+		jsonMatches = []astMatchJson{}
+	}
+
+	b, _ := json.Marshal(jsonMatches)
 
 	return &tool.ToolResult{
 		Title:  fmt.Sprintf("AST Search: %s", symbol),
-		Output: strings.Join(outputLines, "\n"),
+		Output: string(b),
 	}, nil
 }
 

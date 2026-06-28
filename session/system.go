@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -92,6 +93,8 @@ func BuildSystemPrompt(agentID string, tools []map[string]any, env map[string]st
 func buildEnvSection(env map[string]string, workspace string) string {
 	var info []string
 
+	info = append(info, "- Operating System: "+runtime.GOOS)
+
 	cwd := workspace
 	if cwd == "" {
 		if dir, err := os.Getwd(); err == nil {
@@ -112,9 +115,15 @@ func buildEnvSection(env map[string]string, workspace string) string {
 		}
 	}
 
-	if shell := env["SHELL"]; shell != "" {
-		info = append(info, "- Shell: "+shell)
+	shell := env["SHELL"]
+	if shell == "" {
+		if runtime.GOOS == "windows" {
+			shell = "cmd.exe"
+		} else {
+			shell = "/bin/sh"
+		}
 	}
+	info = append(info, "- Default Shell: "+shell)
 
 	if len(info) == 0 {
 		return ""
