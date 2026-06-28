@@ -66,11 +66,15 @@ QuietForge was built on the shoulders of giants:
 
 ## 🔧 Getting Started
 
+### Option 1: Download Pre-compiled Binary (Recommended)
+You can download the ready-to-run binary for Windows, macOS, or Linux directly from the [GitHub Releases](https://github.com/anbuhckr/QuietForge/releases) page. No installation required!
+
+### Option 2: Build from Source
 *(Assuming you have Go installed)*
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/QuietForge.git
+git clone https://github.com/anbuhckr/QuietForge.git
 cd QuietForge
 
 # Build the engine (CGO is required for tree-sitter AST search)
