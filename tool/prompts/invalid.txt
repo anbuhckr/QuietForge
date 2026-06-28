@@ -1,0 +1,4 @@
+Reports that a tool call was invalid or not recognized.
+- Use when no other tool matches the attempted call
+- Provide the tool name and why it failed
+- This is a fallback - you should only call recognized tools

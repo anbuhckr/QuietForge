@@ -1,0 +1,6 @@
+Search file contents using regular expressions.
+- Supports full regex syntax
+- Filters by file pattern with the include parameter
+- Returns matching file paths and line numbers
+- Use for finding function definitions, variable usage, error patterns, etc.
+- For filename-based search, use glob instead

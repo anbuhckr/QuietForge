@@ -1,0 +1,6 @@
+Write new files or overwrite existing ones.
+- Creates parent directories automatically
+- If file exists, it will be completely overwritten
+- Use for creating new files or replacing entire files
+- For partial edits, use edit or apply_patch instead
+- Always read a file first before overwriting it

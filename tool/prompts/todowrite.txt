@@ -1,0 +1,7 @@
+Create and manage a structured task list for the current session.
+- Actions: add, update, list
+- Track progress: pending, in_progress, completed, cancelled
+- Use before starting multi-step work to plan steps
+- Update status as work progresses
+- List to see current state of all tasks
+- Keep exactly one item in_progress at a time

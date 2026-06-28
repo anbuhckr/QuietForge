@@ -1,0 +1,20 @@
+.agent/
+.agents/
+__pycache__/
+node_modules/
+.venv/
+venv/
+.env
+.DS_Store
+
+# QuietForge local files
+make_icon.py
+quietforge.exe
+quietforge
+quietforge.db*
+quietforge_projects.json
+rsrc_windows_*
+server.crt
+server.key
+.quietforge/
+original/

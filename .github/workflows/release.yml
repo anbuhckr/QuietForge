@@ -1,0 +1,65 @@
+name: Build and Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: quietforge
+            asset_name: quietforge-linux-amd64
+          - os: windows-latest
+            artifact_name: quietforge.exe
+            asset_name: quietforge-windows-amd64.exe
+          - os: macos-latest
+            artifact_name: quietforge
+            asset_name: quietforge-darwin-amd64
+          - os: macos-latest
+            artifact_name: quietforge
+            asset_name: quietforge-darwin-arm64
+            goarch: arm64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y gcc g++ libc6-dev
+
+    - name: Build (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        $env:CGO_ENABLED=1
+        go build -o ${{ matrix.artifact_name }}
+      
+    - name: Build (Unix/macOS)
+      if: runner.os != 'Windows'
+      run: |
+        export CGO_ENABLED=1
+        if [ "${{ matrix.goarch }}" == "arm64" ]; then
+          export GOARCH=arm64
+        fi
+        go build -o ${{ matrix.artifact_name }}
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./${{ matrix.artifact_name }}
+        asset_name: ${{ matrix.asset_name }}
+        asset_content_type: application/octet-stream

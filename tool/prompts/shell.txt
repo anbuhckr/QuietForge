@@ -1,0 +1,8 @@
+Execute shell commands asynchronously.
+- Runs in the project's working directory
+- Has configurable timeout
+- Captures stdout, stderr, and exit code
+- Can execute long-running processes
+- Use for git commands, build tools, tests, package managers, etc.
+- Be careful with destructive commands (rm, git push, etc.) - permission may be required
+- Prefer PowerShell commands on Windows, bash on Unix

@@ -1,0 +1,5 @@
+Query the Language Server Protocol for code intelligence.
+- Actions: definition, references, hover, symbols, diagnostics
+- Requires file path and optionally line/column
+- Returns code navigation information
+- Note: Requires a running language server; if unavailable, use grep/glob for navigation

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="/public/marked.min.js"></script>
+  <script src="/public/index.umd.js"></script>
+  <script src="/public/purify.min.js"></script>
+  <script src="/public/highlight.min.js"></script>
+</head>
+<body>
+  <script>
+    window.onload = function() {
+      const { markedHighlight } = window.markedHighlight;
+      marked.use(markedHighlight({
+        langPrefix: 'hljs language-',
+        highlight(code, lang) {
+          const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+          return hljs.highlight(code, { language }).value;
+        }
+      }));
+      const raw = '```javascript\nconst a = 1;\n```';
+      const parsed = marked.parse(raw);
+      const purified = DOMPurify.sanitize(parsed);
+      document.body.innerHTML = '<div><h2>Raw Parsed</h2><div id="raw"></div><h2>Purified</h2><div id="purified"></div></div>';
+      document.getElementById('raw').innerText = parsed;
+      document.getElementById('purified').innerText = purified;
+    };
+  </script>
+</body>
+</html>

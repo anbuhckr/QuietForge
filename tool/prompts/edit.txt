@@ -1,0 +1,7 @@
+Edit existing files using exact string replacement.
+- Finds the oldString in the file and replaces it with newString
+- oldString must match exactly the current file content including indentation
+- Use enough context in oldString to uniquely identify the match
+- If oldString appears multiple times, use replaceAll=true or add more context
+- Always read the file first to get the exact content
+- For complex multi-line changes, apply_patch is also available

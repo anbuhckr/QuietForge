@@ -1,0 +1,5 @@
+Find files by glob pattern matching on filename.
+- Supports patterns like "**/*.py", "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+- Use for locating files when you know the name pattern
+- For searching file contents, use grep instead

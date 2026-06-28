@@ -1,0 +1,5 @@
+Ask the user a question when you need clarification or input.
+- Use when instructions are ambiguous or you need to make a decision
+- Provide clear, concise questions
+- Optionally list answer options for the user to choose from
+- Do not overuse this - try to infer from context first

@@ -1,0 +1,7 @@
+Spawns an isolated sub-agent worker in the background for massive tasks.
+
+- Use for parallel exploration, multi-step research, or isolated sub-tasks that would pollute your context.
+- Available agent types: explore, general, build, plan.
+- The tool returns a session ID immediately. The subagent runs asynchronously.
+- When the subagent finishes, it will inject a message into your chat history.
+- Prefer this over doing everything in the main conversation when tasks are massive.

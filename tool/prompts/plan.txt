@@ -1,0 +1,5 @@
+Exit plan mode and switch back to the build agent.
+- Call when the plan is complete and ready to implement
+- Provide a summary of what was accomplished during planning
+- Optionally include the plan file path
+- The system will switch to the build agent with this context

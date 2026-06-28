@@ -1,0 +1,5 @@
+Search the web for current information.
+- Returns search results with titles, snippets, and URLs
+- Supports different search types: auto, fast, deep
+- Use for finding documentation, recent news, API changes, etc.
+- For fetching a specific URL, use webfetch instead

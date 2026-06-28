@@ -1,0 +1,16 @@
+Apply a search/replace patch to a file using SEARCH/REPLACE blocks.
+- Each block must have a file path, SEARCH section (exact existing text), and REPLACE section (new text)
+- SEARCH must match the file contents exactly
+- If SEARCH is not found, the patch fails
+- Multiple blocks can be applied atomically
+- Format:
+```
+file/path.py
+```python
+<<<<<<< SEARCH
+existing code here
+=======
+new code here
+>>>>>>> REPLACE
+```
+- Prefer edit tool for simple single replacements

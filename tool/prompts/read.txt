@@ -1,0 +1,6 @@
+Read existing files. Always read files before editing them.
+- Read full files or specific line ranges using offset/limit
+- Returns content with line numbers prefixed (e.g., `1: def foo():`)
+- Directory listing when path is a directory
+- If file does not exist, returns error
+- Use this to understand code context before making changes
