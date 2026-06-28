@@ -8,6 +8,14 @@
   "password": "optional_secure_password",
   "ssl_cert": "",
   "ssl_key": "",
+  "compaction": {
+    "auto": true,
+    "tail_turns": 10,
+    "preserve_recent_tokens": 4000,
+    "reserved": 4000,
+    "prune": true,
+    "tool_truncation_limit": 2000
+  },
   "mcp": {
     "servers": {
       "example-mcp-server": {
