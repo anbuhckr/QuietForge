@@ -45,7 +45,7 @@ jobs:
       if: runner.os == 'Windows'
       run: |
         $env:CGO_ENABLED=1
-        go build -o ${{ matrix.artifact_name }}
+        go build -o ${{ matrix.asset_name }}
       
     - name: Build (Unix/macOS)
       if: runner.os != 'Windows'
@@ -54,14 +54,11 @@ jobs:
         if [ "${{ matrix.goarch }}" == "arm64" ]; then
           export GOARCH=arm64
         fi
-        go build -o ${{ matrix.artifact_name }}
+        go build -o ${{ matrix.asset_name }}
 
     - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: softprops/action-gh-release@v2
       with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./${{ matrix.artifact_name }}
-        asset_name: ${{ matrix.asset_name }}
-        asset_content_type: application/octet-stream
+        files: ./${{ matrix.asset_name }}
+        name: Release ${{ github.ref_name }}
+        tag_name: ${{ github.ref_name }}
