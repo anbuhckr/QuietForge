@@ -78,7 +78,7 @@ func (t *ShellTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", params.Command)
+		cmd = exec.Command("powershell", "-Command", params.Command)
 	} else {
 		cmd = exec.Command("sh", "-c", params.Command)
 	}

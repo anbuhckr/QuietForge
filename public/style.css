@@ -344,7 +344,7 @@ code.hljs {
 .editor::placeholder { color: var(--text-dim); }
 .mention { color: var(--accent-primary); background: rgba(129,140,248,0.1); padding: 0 4px; border-radius: 4px; }
 
-.bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid rgba(255, 255, 255,0.05); }
+.bar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid rgba(255, 255, 255,0.05); }
 
 .mode-dropdown { position: relative; display: inline-block; }
 .mode-dropdown-toggle { font-family: var(--mono); font-size: 12px; padding: 3px 18px 3px 8px; border: none; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; outline: none; min-width: 52px; text-align: left; transition: 0.15s; position: relative; }
@@ -367,7 +367,7 @@ code.hljs {
 .round.attach { width: 36px; height: 36px; border-radius: 18px; padding: 0; background: transparent; border: none; font-size: 20px; line-height: 1; color: var(--text-muted); display: flex; align-items: center; justify-content: center; }
 .round.attach:hover { background: rgba(255, 255, 255,0.05); color: var(--text-main); }
 .round.submit { width: 32px; height: 32px; border-radius: 16px; padding: 0; background: transparent; color: var(--text-muted); border: 1px solid rgba(255, 255, 255,0.1); transition: 0.2s; display: grid; place-items: center; }
-.round.submit svg { transform: translate(-1px, 1px); }
+.round.submit svg { margin-left: 6px; }
 .round.submit:hover { background: rgba(129, 140, 248, 0.15); color: #e0e7ff; border-color: rgba(129, 140, 248, 0.4); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(129, 140, 248, 0.2); }
 .round.stop { width: 32px; height: 32px; border-radius: 16px; padding: 0; background: rgba(239, 68, 68, 0.1); color: var(--danger); border: none; display: none; }
 

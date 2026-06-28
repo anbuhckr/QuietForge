@@ -3,6 +3,8 @@
   "base_url": "https://openrouter.ai/api/v1",
   "model": "google/gemini-2.5-pro",
   "disable_vision": false,
+  "port": 8080,
+  "ssl_port": 8443,
   "password": "optional_secure_password",
   "ssl_cert": "",
   "ssl_key": "",

@@ -238,6 +238,14 @@ func parseConfig(data map[string]any) Config {
 	if mode, ok := data["mode"].(map[string]any); ok {
 		cfg.Mode = mode
 	}
+	if port, ok := data["port"].(float64); ok {
+		p := int(port)
+		cfg.Port = &p
+	}
+	if sslPort, ok := data["ssl_port"].(float64); ok {
+		p := int(sslPort)
+		cfg.SSLPort = &p
+	}
 
 	return cfg
 }
@@ -368,6 +376,12 @@ func configToDict(cfg Config) map[string]any {
 		}
 		mcpMap["servers"] = servers
 		d["mcp"] = mcpMap
+	}
+	if cfg.Port != nil {
+		d["port"] = *cfg.Port
+	}
+	if cfg.SSLPort != nil {
+		d["ssl_port"] = *cfg.SSLPort
 	}
 	return d
 }

@@ -74,4 +74,6 @@ type Config struct {
 	DefaultAgent      *string                    `json:"default_agent,omitempty"`
 	Mode              map[string]any     		 `json:"mode"`
 	DisableVision     bool                       `json:"disable_vision"`
+	Port              *int                       `json:"port,omitempty"`
+	SSLPort           *int                       `json:"ssl_port,omitempty"`
 }

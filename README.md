@@ -53,7 +53,16 @@ QuietForge supports powerful local customization by reading from a `.agents` dir
 
 ## ⚙️ Project Configuration (.quietforge)
 
-Beyond agent-specific behavior, QuietForge also supports a `.quietforge` directory for core application settings and plugins:
+Beyond agent-specific behavior, QuietForge also supports a `.quietforge` directory for core application settings and plugins. Here is what a typical project directory looks like:
+
+```text
+your-project/
+├── .quietforge/
+│   ├── workspaces/
+│   └── config.json
+└── quietforge.exe
+```
+
 * **`config.json`**: Override default LLM models, set API keys, or tweak core engine parameters. **Vision Support:** Set `"disable_vision": true` if your chosen LLM does not support image inputs to prevent API crash loops. **Security features:** Adding a `password` field will lock down the web UI, and providing `ssl_cert` and `ssl_key` paths will automatically serve QuietForge over HTTPS.
 * **`tools/` Directory**: Drop custom tools or external tool definitions here. QuietForge will dynamically load them into the agent's tool registry!
 * **`workspaces/` Directory**: Used internally by QuietForge to manage isolated Git worktrees and temporary session environments.

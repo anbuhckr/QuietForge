@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,7 +33,11 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/filesystem"
 )
+
+//go:embed public/*
+var publicFiles embed.FS
 
 var (
 	activeSession      *session.Session
@@ -643,10 +649,19 @@ func main() {
 	})
 	app.Use(cors.New())
 	app.Use(authMiddleware)
-	app.Static("/public", "./public")
+	app.Use("/public", filesystem.New(filesystem.Config{
+		Root:       http.FS(publicFiles),
+		PathPrefix: "public",
+		Browse:     false,
+	}))
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		return c.SendFile("./public/index.html")
+		file, err := publicFiles.ReadFile("public/index.html")
+		if err != nil {
+			return c.Status(500).SendString("index.html not found in binary")
+		}
+		c.Set("Content-Type", "text/html")
+		return c.Send(file)
 	})
 
 	api := app.Group("/api")
@@ -664,8 +679,14 @@ func main() {
 	sslCert, sslKey := loadRawSSLConfig()
 	hasSSLCfg := sslCert != "" && sslKey != ""
 	port := 80
+	if appCfg.Port != nil {
+		port = *appCfg.Port
+	}
 	if hasSSLCfg {
 		port = 443
+		if appCfg.SSLPort != nil {
+			port = *appCfg.SSLPort
+		}
 	}
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	log.Printf("QuietForge server starting on %s", addr)
