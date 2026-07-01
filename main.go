@@ -690,7 +690,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.0.4")
+		fmt.Println("QuietForge v1.0.5")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
