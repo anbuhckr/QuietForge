@@ -56,11 +56,16 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 
 	for i, msg := range history {
 		if msg.Role == "assistant" {
-			for j, part := range msg.Parts {
+			partsCopy := make([]MessagePart, len(msg.Parts))
+			copy(partsCopy, msg.Parts)
+			for j, part := range partsCopy {
 				if part.Type == "text" && part.Content != "" {
-					history[i].Parts[j].Content = thinkPattern.ReplaceAllString(part.Content, "")
+					if thinkPattern.MatchString(part.Content) {
+						partsCopy[j].Content = thinkPattern.ReplaceAllString(part.Content, "<think>\n[Thought process omitted for context limits]\n</think>")
+					}
 				}
 			}
+			history[i].Parts = partsCopy
 		}
 	}
 

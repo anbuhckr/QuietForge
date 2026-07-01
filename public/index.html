@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>QuietForge</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/public/style.css?v=29">
+<link rel="stylesheet" href="/public/style.css?v=37">
 <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
 <script src="/public/marked.min.js"></script>
 <script src="/public/index.umd.js"></script>
@@ -224,39 +224,102 @@
   <div class="dialog">
     <button class="modal-close x" id="settingsClose">×</button>
     <h2>Preferences</h2>
-    <p>Model connection settings.</p>
     <div class="config-container">
-      <h3 class="config-section-title">Model Configuration</h3>
+      <div id="providersContainer">
+        <!-- Dynamic provider fields will be inserted here -->
+      </div>
+      <button type="button" id="addProviderBtn" class="diag-button" style="margin-bottom: 15px; width: 100%;">+ Add Fallback Provider</button>
       <div class="config-group">
-        <label class="config-label" for="cfgModel">Model Name</label>
-        <input type="text" id="cfgModel" class="config-input">
+        <label class="config-label">Compaction Settings</label>
+        <button type="button" id="openCompactionBtn" class="diag-button" style="width: 100%;">Advanced Compaction Settings</button>
       </div>
       <div class="config-group">
-        <label class="config-label" for="cfgBaseUrl">Base URL</label>
-        <input type="text" id="cfgBaseUrl" placeholder="http://127.0.0.1:11434" class="config-input">
+        <label class="config-label">MCP Servers</label>
+        <button type="button" id="openMcpModalBtn" class="diag-button" style="width: 100%;">Manage MCP Servers</button>
       </div>
       <div class="config-group">
-        <label class="config-label" for="cfgApiKey">API Key (Optional)</label>
-        <input type="password" id="cfgApiKey" class="config-input">
-      </div>
-      <div class="config-group">
-        <label class="config-label" for="cfgMaxMessages">Max Messages Before Compaction</label>
-        <input type="number" id="cfgMaxMessages" min="10" max="500" value="60" class="config-input">
+        <label class="config-label" for="cfgShellAccess">Shell Access</label>
+        <select id="cfgShellAccess" class="config-input">
+          <option value="allow">Allowed (Default)</option>
+          <option value="ask">Prompt for permission</option>
+        </select>
       </div>
 
 
-      <div class="diag-actions" style="margin-top: 1rem;">
-        <button id="diagModelTest" type="button" class="diag-button">Test Model Connection</button>
-      </div>
-      <div class="diag-results" id="diagResults"></div>
     </div>
 
     <div class="dialog-actions">
-      <button id="settingsSave">Save Configuration</button>
+      <button id="settingsSave" class="diag-button">Save Configuration</button>
     </div>
   </div>
 </div>
 
-<script src="/public/app.js?v=31"></script>
+<div class="modal" id="mcpModal">
+  <div class="dialog">
+    <button class="modal-close x" id="mcpClose">×</button>
+    <h2>MCP Servers</h2>
+    <div class="config-container">
+      <div id="mcpContainer"></div>
+      <button type="button" id="addMcpBtn" class="diag-button" style="margin-bottom: 15px; width:100%;">+ Add MCP Server</button>
+    </div>
+    <div class="dialog-actions">
+      <button id="mcpSave" class="diag-button">Save MCP Servers</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="compactionModal">
+  <div class="dialog">
+    <button class="modal-close x" id="compactionClose">×</button>
+    <h2>Advanced Compaction</h2>
+    <div class="config-container">
+      <div class="config-group">
+        <label class="config-label">Tail Turns to preserve literally</label>
+        <input type="number" id="cfgCompactionTailTurns" class="config-input" min="1" step="1">
+      </div>
+      <div class="config-group">
+        <label class="config-label">Preserve Recent Tokens (guaranteed minimum)</label>
+        <input type="number" id="cfgCompactionPreserveTokens" class="config-input" min="1000" step="1000">
+      </div>
+      <div class="config-group">
+        <label class="config-label">Reserved Tokens (buffer)</label>
+        <input type="number" id="cfgCompactionReserved" class="config-input" min="1000" step="1000">
+      </div>
+      <div class="config-group">
+        <label class="config-label">Tool Truncation Limit (chars per tool)</label>
+        <input type="number" id="cfgCompactionTruncation" class="config-input" min="1000" step="1000">
+      </div>
+      <div class="config-group">
+        <label class="config-label" style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="cfgCompactionAuto"> Enable Auto-Compaction
+        </label>
+      </div>
+      <div class="config-group">
+        <label class="config-label" style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="cfgCompactionPrune"> Prune Unused Tool Outputs Completely
+        </label>
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button id="compactionSave" class="diag-button">Save Compaction Rules</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="toolPromptModal">
+  <div class="dialog" style="max-width: 600px;">
+    <h2>Permission Required</h2>
+    <p>The AI wants to execute the following <strong id="promptToolName">shell</strong> command:</p>
+    <div style="background: #0d1117; padding: 10px; border-radius: 6px; border: 1px solid #30363d; margin: 15px 0; max-height: 300px; overflow-y: auto;">
+      <pre style="margin: 0;"><code id="promptToolCommand" style="color: #c9d1d9; font-family: monospace; white-space: pre-wrap; font-size: 13px;"></code></pre>
+    </div>
+    <div class="dialog-actions" style="justify-content: flex-end; gap: 10px;">
+      <button id="promptRejectBtn" style="background: transparent; border: 1px solid #f85149; color: #f85149;">Reject</button>
+      <button id="promptApproveBtn" style="background: #238636; color: white;">Approve</button>
+    </div>
+  </div>
+</div>
+
+<script src="/public/app.js?v=44"></script>
 </body>
 </html>

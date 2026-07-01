@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -28,10 +30,15 @@ func (t *ShellTool) Description() string {
 }
 
 func (t *ShellTool) Parameters() map[string]interface{} {
+	cmdDesc := "The command to execute"
+	if runtime.GOOS == "windows" {
+		cmdDesc += ". Note: DO NOT use the Unix 'timeout' command inside this string on Windows; use the tool's timeout parameter instead."
+	}
+	
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"command":     map[string]interface{}{"type": "string", "description": "The command to execute"},
+			"command":     map[string]interface{}{"type": "string", "description": cmdDesc},
 			"description": map[string]interface{}{"type": "string", "description": "Short description"},
 			"timeout":     map[string]interface{}{"type": "integer", "description": "Timeout in milliseconds"},
 			"workdir":     map[string]interface{}{"type": "string", "description": "Working directory"},
@@ -64,6 +71,10 @@ func (t *ShellTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 		return nil, fmt.Errorf("invalid arguments: %v", err)
 	}
 
+	if warn := validateCommand(params.Command); warn != "" {
+		return &tool.ToolResult{Error: fmt.Sprintf("Command rejected: %s", warn)}, nil
+	}
+
 	if params.Timeout == 0 {
 		params.Timeout = 120000
 	}
@@ -76,19 +87,49 @@ func (t *ShellTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 		workdir = filepath.Join(ctx.Workspace, workdir)
 	}
 
+	execCtx, execCancel := context.WithTimeout(context.Background(), time.Duration(params.Timeout)*time.Millisecond)
+
 	var cmd *exec.Cmd
+	var ps1Path string
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", params.Command)
+		ps1File, err := os.CreateTemp("", "qf_cmd_*.ps1")
+		if err != nil {
+			execCancel()
+			return nil, fmt.Errorf("failed to create temp ps1 file: %v", err)
+		}
+		ps1Path = ps1File.Name()
+		ps1File.WriteString("[console]::InputEncoding = [console]::OutputEncoding = New-Object System.Text.UTF8Encoding\r\n$OutputEncoding = New-Object System.Text.UTF8Encoding\r\n" + params.Command)
+		ps1File.Close()
+		
+		cmd = exec.CommandContext(execCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", ps1Path)
 	} else {
-		cmd = exec.Command("sh", "-c", params.Command)
+		cmd = exec.CommandContext(execCtx, "sh", "-c", params.Command)
 	}
 	cmd.Dir = workdir
+	
+	cmd.Cancel = func() error {
+		killProcessTree(cmd)
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+
+	// Force common languages to output UTF-8 when piped
+	cmd.Env = append(os.Environ(), 
+		"PYTHONIOENCODING=utf-8", 
+		"PYTHONUTF8=1",
+		"JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8",
+		"RUBYOPT=-Eutf-8",
+	)
 
 	if params.Background {
 		var stdoutBuf, stderrBuf bytes.Buffer
 		cmd.Stdout = &stdoutBuf
 		cmd.Stderr = &stderrBuf
 		if err := cmd.Start(); err != nil {
+			if ps1Path != "" {
+				os.Remove(ps1Path)
+			}
+			execCancel()
 			return &tool.ToolResult{Error: err.Error()}, nil
 		}
 
@@ -98,20 +139,27 @@ func (t *ShellTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 		bgShellCmds[bgID] = cmd
 		bgShellMu.Unlock()
 
-		go runBackgroundCommand(bgID, cmd, &stdoutBuf, &stderrBuf, params.Command, params.Timeout, ctx)
+		go runBackgroundCommand(bgID, cmd, &stdoutBuf, &stderrBuf, params.Command, execCtx, execCancel, ctx, ps1Path, params.Timeout)
 		return &tool.ToolResult{Output: fmt.Sprintf("Command `%s` started in background (id=%s). You will be notified when it completes.", params.Command, bgID)}, nil
 	}
 
-	execCtx, cancel := context.WithTimeout(context.Background(), time.Duration(params.Timeout)*time.Millisecond)
-	defer cancel()
-	cmd = exec.CommandContext(execCtx, cmd.Path, cmd.Args...)
-	cmd.Dir = workdir
-	
+	defer execCancel()
+	if ps1Path != "" {
+		defer os.Remove(ps1Path)
+	}
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return &tool.ToolResult{Error: fmt.Sprintf("failed to start command: %v", err)}, nil
+	}
+
+	err := cmd.Wait()
+	if execCtx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("command timed out after %d ms", params.Timeout)
+	}
 	stdoutBytes := stdoutBuf.Bytes()
 	errorStr := stderrBuf.String()
 
@@ -160,23 +208,14 @@ func (t *ShellTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 	return &tool.ToolResult{Output: strings.TrimSpace(resultStr)}, nil
 }
 
-func runBackgroundCommand(bgID string, cmd *exec.Cmd, stdoutBuf, stderrBuf *bytes.Buffer, command string, timeout int, ctx *tool.ToolContext) {
+func runBackgroundCommand(bgID string, cmd *exec.Cmd, stdoutBuf, stderrBuf *bytes.Buffer, command string, execCtx context.Context, execCancel context.CancelFunc, ctx *tool.ToolContext, ps1Path string, timeout int) {
 	defer bgShellRemove(bgID)
-
-	done := make(chan struct{})
-	go func() {
-		cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Duration(timeout) * time.Millisecond):
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		<-done
+	defer execCancel()
+	if ps1Path != "" {
+		defer os.Remove(ps1Path)
 	}
+
+	err := cmd.Wait()
 
 	stdoutBytes := stdoutBuf.Bytes()
 	errorStr := stderrBuf.String()
@@ -194,6 +233,11 @@ func runBackgroundCommand(bgID string, cmd *exec.Cmd, stdoutBuf, stderrBuf *byte
 			result += fmt.Sprintf("\n(exit code: %d)", exitCode)
 			result += "\n" + errorStr
 		}
+		if execCtx.Err() == context.DeadlineExceeded {
+			result += fmt.Sprintf("\n\n[Command timed out after %d ms]", timeout)
+		} else if err != nil {
+			result += fmt.Sprintf("\n\n[Command failed: %v]", err)
+		}
 
 		lines := strings.Split(result, "\n")
 		if len(lines) > 500 {
@@ -207,13 +251,27 @@ func runBackgroundCommand(bgID string, cmd *exec.Cmd, stdoutBuf, stderrBuf *byte
 	fmt.Printf("\n[Background Task Finished] `%s`. Result appended to context.", command)
 }
 
+func killProcessTree(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		// taskkill /F /T forces termination of the process and all its children
+		exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid)).Run()
+	} else {
+		cmd.Process.Kill()
+	}
+}
+
 func KillBackgroundShells() {
 	bgShellMu.Lock()
 	defer bgShellMu.Unlock()
 	for id, cmd := range bgShellCmds {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
+		killProcessTree(cmd)
 		delete(bgShellCmds, id)
 	}
 }
@@ -234,7 +292,75 @@ func appendToActiveSession(msgContent string, ctx *tool.ToolContext) {
 		},
 		CreatedAt: time.Now().UnixMilli(),
 	}
-	s.AddMessage(msg)
+	if err := s.AddMessage(msg); err != nil {
+		log.Printf("appendToActiveSession: AddMessage failed: %v", err)
+	}
+	s.QueueFollowup("background_task_completed")
+}
+
+const maxCommandLength = 50000
+
+func validateCommand(cmd string) string {
+	if len(cmd) > maxCommandLength {
+		return fmt.Sprintf("command too long (%d chars, max %d)", len(cmd), maxCommandLength)
+	}
+
+	low := strings.ToLower(strings.TrimSpace(cmd))
+
+	dangerous := []struct {
+		pattern string
+		reason  string
+	}{
+		{`rm -rf /`, "recursive root deletion"},
+		{`rm -rf ~`, "recursive home deletion"},
+		{`rm -rf --no-preserve-root`, "forced root deletion"},
+		{`:(){ :|:& };:`, "fork bomb"},
+		{`dd if=/dev/zero`, "disk wipe (dd)"},
+		{`dd if=/dev/random`, "disk overwrite (dd)"},
+		{`mkfs.`, "filesystem format"},
+		{`format `, "disk format"},
+		{`fdisk`, "partition editor"},
+		{`mkswap`, "swap format"},
+		{`> /dev/sd`, "raw block device write"},
+		{`. > /dev/sd`, "raw block device write"},
+		{`Remove-Item -Recurse -Force`, "forced recursive deletion (PowerShell)"},
+		{`Remove-Item -Force -Recurse`, "forced recursive deletion (PowerShell)"},
+		{`del /f /s /q`, "forced recursive deletion (cmd)"},
+		{`rd /s /q`, "forced directory deletion (cmd)"},
+		{`rmdir /s /q`, "forced directory deletion (cmd)"},
+		{`cipher /w:`, "disk wipe (cipher)"},
+		{`reg delete`, "registry deletion"},
+		{`reg add`, "registry modification"},
+		{`New-ItemProperty -Path`, "registry modification (PowerShell)"},
+		{`Set-ItemProperty -Path`, "registry modification (PowerShell)"},
+		{`Remove-ItemProperty -Path`, "registry deletion (PowerShell)"},
+		{`Stop-Computer`, "system shutdown"},
+		{`Restart-Computer`, "system restart"},
+		{`shutdown /s`, "system shutdown"},
+		{`shutdown /r`, "system restart"},
+		{`-EncodedCommand`, "encoded PowerShell command"},
+		{`Invoke-Expression`, "arbitrary expression execution"},
+		{`iex `, "invoke expression"},
+		{`Start-BitsTransfer`, "background file download"},
+		{`Net.WebClient`, "web client download"},
+		{`Net.Sockets.TCPClient`, "network connection"},
+		{`[System.IO.File]::`, "direct .NET file access"},
+		{`[System.IO.Directory]::`, "direct .NET directory access"},
+		{`[System.IO.DriveInfo]::`, "direct .NET drive access"},
+		{`[System.Management]::`, "WMI access"},
+		{`Get-WmiObject`, "WMI access"},
+		{`Set-MpPreference`, "Windows Defender modification"},
+		{`Add-MpPreference`, "Windows Defender modification"},
+		{`Set-ExecutionPolicy`, "PowerShell execution policy change"},
+		{`Set-MpPreference -DisableRealtimeMonitoring`, "disable real-time monitoring"},
+	}
+
+	for _, d := range dangerous {
+		if strings.Contains(low, d.pattern) {
+			return d.reason
+		}
+	}
+	return ""
 }
 
 func isShellOutputBinary(data []byte) bool {

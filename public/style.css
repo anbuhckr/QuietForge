@@ -284,12 +284,10 @@ code.hljs {
 .inline-live .live-entry {
   width: 100%; max-width: 100%; box-sizing: border-box;
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
-  padding-left: 12px; margin-top: 8px; border-left: 2px solid rgba(255,255,255,0.05);
+  margin-top: 8px;
 }
-.inline-live .live-entry:first-child {
-  position: sticky; top: 0; z-index: 1;
-  background: var(--bg, #1e1e2e);
-  border-bottom: 1px solid rgba(255,255,255,0.08);
+.inline-live .live-entry:not(.action-entry) {
+  /* removed sticky */
 }
 .inline-live .glyph { color: var(--accent-primary); animation: spin 2s linear infinite; display: inline-block; }
 @keyframes spin { 100% { transform: rotate(360deg); } }
@@ -1155,8 +1153,8 @@ details:not([open]).diff-widget > .diff-widget-header {
 .inline-live.flat-live .livetext { display: none !important; }
 .inline-live.flat-live .timer { display: inline-block; font-size: 10px; font-family: var(--font-mono, monospace); color: var(--text-dim); margin: 0; opacity: 0.6; background: rgba(0,0,0,0.4); padding: 2px 6px; border-radius: 4px; }
 .inline-live.flat-live .live-log { margin-top: 0 !important; padding-left: 0 !important; padding-right: 80px !important; gap: 6px !important; display: flex !important; flex-wrap: wrap !important; flex-direction: row !important; }
-.inline-live.flat-live .live-log .live-entry { margin: 0 !important; padding: 0 !important; white-space: normal !important; width: 100%; }
-.inline-live.flat-live .live-log .live-entry.action-entry { 
+.inline-live.flat-live .live-log .live-entry.action-entry, .inline-live.live-compact .live-log .live-entry.action-entry { margin: 0 !important; padding: 0 !important; white-space: normal !important; width: 100%; }
+.inline-live.flat-live .live-log .live-entry.action-entry, .inline-live.live-compact .live-log .live-entry.action-entry { 
   white-space: pre-wrap !important; 
   background: rgba(129, 140, 248, 0.08);
   border: 1px solid rgba(129, 140, 248, 0.2);
@@ -1175,7 +1173,7 @@ details:not([open]).diff-widget > .diff-widget-header {
   line-height: 1.4;
   vertical-align: middle;
 }
-.inline-live.flat-live .live-log .live-entry.action-entry p {
+.inline-live.flat-live .live-log .live-entry.action-entry p, .inline-live.live-compact .live-log .live-entry.action-entry p {
   display: inline !important;
   margin: 0 !important;
   padding: 0 !important;
@@ -1184,14 +1182,16 @@ details:not([open]).diff-widget > .diff-widget-header {
   animation: pulseGlow 2s infinite alternate;
 }
 .inline-live.flat-live.done .live-log .live-entry.action-entry,
-.inline-live.flat-live.done .live-log .live-entry.action-entry * {
+.inline-live.live-compact .live-log .live-entry.action-entry,
+.inline-live.flat-live.done .live-log .live-entry.action-entry *,
+.inline-live.live-compact .live-log .live-entry.action-entry * {
   border-color: rgba(16, 185, 129, 0.2) !important;
   color: #a7f3d0 !important;
   background: rgba(16, 185, 129, 0.08) !important;
   animation: none !important;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
 }
-.inline-live.flat-live .live-log .live-entry * { margin: 0 !important; }
+.inline-live.flat-live .live-log .live-entry.action-entry *, .inline-live.live-compact .live-log .live-entry.action-entry * { margin: 0 !important; }
 .live-log .markdown-body h1, .live-log .markdown-body h2, .live-log .markdown-body h3, .live-log .markdown-body h4, .live-log .markdown-body h5, .live-log .markdown-body h6 { font-size: 14px !important; margin: 4px 0 !important; line-height: 1.4 !important; }
 .inline-live[data-live-kind="think"] .live-log, .inline-live[data-live-kind="think"] .live-log * {
     font-family: 'Inter', sans-serif !important;

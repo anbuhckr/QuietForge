@@ -118,7 +118,7 @@ func buildEnvSection(env map[string]string, workspace string) string {
 	shell := env["SHELL"]
 	if shell == "" {
 		if runtime.GOOS == "windows" {
-			shell = "cmd.exe"
+			shell = "powershell.exe"
 		} else {
 			shell = "/bin/sh"
 		}

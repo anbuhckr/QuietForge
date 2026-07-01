@@ -14,7 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,7 @@ var (
 	stopRequested      bool
 	engineCancel       context.CancelFunc
 	engineMu           sync.Mutex
+	sessionMu          sync.RWMutex
 	liveEvents         []map[string]any
 	eventsMu           sync.Mutex
 	// token usage stored per-session in activeSession.PromptTokens / CompletionTokens
@@ -83,33 +86,162 @@ func loadCfg() config.Config {
 	return config.LoadConfig(".")
 }
 
-func clientFromCfg(cfg config.Config) *provider.Client {
-	model := "gpt-4o"
-	if cfg.Model != nil {
-		model = *cfg.Model
-	}
-	var apiKey, baseURL string
-	for _, pc := range cfg.Provider {
-		if pc.APIKey != nil {
-			apiKey = *pc.APIKey
-		}
-		if pc.BaseURL != nil {
-			baseURL = *pc.BaseURL
-		}
-		if apiKey != "" {
-			break
-		}
-	}
+func buildProviderInstance(id, apiKey, baseURL, model string, disableVision bool) *provider.ProviderInstance {
 	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
+		return nil
 	}
-	return provider.NewClient(apiKey, baseURL, model)
+	ocfg := openai.DefaultConfig(apiKey)
+	if baseURL != "" {
+		ocfg.BaseURL = baseURL
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	ocfg.HTTPClient = &http.Client{Transport: transport}
+	return &provider.ProviderInstance{
+		ID:            id,
+		Client:        openai.NewClientWithConfig(ocfg),
+		Model:         model,
+		DisableVision: disableVision,
+	}
+}
+
+func clientFromCfg(cfg config.Config) *provider.Client {
+	globalModel := "gpt-4o"
+	if cfg.Model != nil {
+		globalModel = *cfg.Model
+	}
+	
+	var instances []provider.ProviderInstance
+	
+	collect := func(pid string, pc config.ProviderConfig, mdl string) {
+		key := ""
+		if pc.APIKey != nil { key = *pc.APIKey }
+		base := ""
+		if pc.BaseURL != nil { base = *pc.BaseURL }
+		if pc.Model != nil { mdl = *pc.Model }
+		dv := false
+		if pc.DisableVision != nil { dv = *pc.DisableVision }
+		if inst := buildProviderInstance(pid, key, base, mdl, dv); inst != nil {
+			instances = append(instances, *inst)
+		}
+	}
+	
+	added := make(map[string]bool)
+	for _, pid := range cfg.EnabledProviders {
+		if pc, ok := cfg.Provider[pid]; ok {
+			collect(pid, pc, globalModel)
+			added[pid] = true
+		}
+	}
+	
+	for pid, pc := range cfg.Provider {
+		if !added[pid] {
+			collect(pid, pc, globalModel)
+		}
+	}
+
+	if len(instances) == 0 {
+		if inst := buildProviderInstance("primary", os.Getenv("OPENAI_API_KEY"), "", globalModel, false); inst != nil {
+			instances = append(instances, *inst)
+		}
+	}
+	
+	return provider.NewMultiClient(instances, globalModel)
+}
+
+func promoteFallbackProvider(c *provider.Client, addEvt func(string, map[string]any)) {
+	successID := c.GetSuccessfulProviderID()
+	if successID == "" {
+		return
+	}
+	currentPrimary := ""
+	if len(appCfg.EnabledProviders) > 0 {
+		currentPrimary = appCfg.EnabledProviders[0]
+	}
+	if currentPrimary != "" && successID != currentPrimary {
+		rawCfg := loadRawConfig()
+		if rawCfg != nil {
+			if eps, ok := rawCfg["enabled_providers"].([]interface{}); ok {
+				idx := -1
+				for idxi, v := range eps {
+					if str, ok := v.(string); ok && str == successID {
+						idx = idxi
+						break
+					}
+				}
+				if idx > 0 {
+					eps = append(eps[:idx], eps[idx+1:]...)
+					eps = append([]interface{}{successID}, eps...)
+					
+					if pMap, ok := rawCfg["provider"].(map[string]any); ok {
+						newProvMap := make(map[string]any)
+						var newEps []interface{}
+						for i, oldIDAny := range eps {
+							oldID, _ := oldIDAny.(string)
+							var newID string
+							if i == 0 {
+								newID = "primary"
+							} else {
+								newID = fmt.Sprintf("fallback_%d", i)
+							}
+							newEps = append(newEps, newID)
+							if pCfg, ok := pMap[oldID]; ok {
+								newProvMap[newID] = pCfg
+							}
+						}
+						rawCfg["provider"] = newProvMap
+						rawCfg["enabled_providers"] = newEps
+					} else {
+						rawCfg["enabled_providers"] = eps
+					}
+					
+					saveRawConfig(rawCfg)
+					appCfg = loadCfg()
+					if addEvt != nil {
+						addEvt("primary_changed", map[string]any{"new_primary_id": "primary"})
+					}
+				}
+			}
+		}
+	}
 }
 
 func isEngineRunning() bool {
 	engineMu.Lock()
 	defer engineMu.Unlock()
 	return engineRunning
+}
+
+var pendingToolApprovals sync.Map
+
+func askPermissionCallback(toolName, toolInput, agentID string) (bool, error) {
+	callID := fmt.Sprintf("%d", time.Now().UnixNano())
+	ch := make(chan bool, 1)
+	pendingToolApprovals.Store(callID, ch)
+	defer pendingToolApprovals.Delete(callID)
+
+	var cmdData any = toolInput
+	if toolName == "shell" {
+		var args map[string]any
+		if err := json.Unmarshal([]byte(toolInput), &args); err == nil {
+			if cmd, ok := args["command"].(string); ok {
+				cmdData = cmd
+			}
+		}
+	}
+
+	addLiveEvent("prompt", map[string]any{
+		"call_id": callID,
+		"tool":    toolName,
+		"command": cmdData,
+	})
+
+	select {
+	case result := <-ch:
+		return result, nil
+	case <-time.After(10 * time.Minute):
+		return false, fmt.Errorf("timeout waiting for user approval")
+	}
 }
 
 func buildToolSchemas(agentID string) []map[string]any {
@@ -149,85 +281,43 @@ func buildOpenAIToolDefs(agentID string) []openai.Tool {
 }
 
 func getSessionLog() []map[string]any {
-	if activeSession == nil {
+	sessionMu.RLock()
+	s := activeSession
+	sessionMu.RUnlock()
+	if s == nil {
 		return nil
 	}
-	raw := activeSession.GetHistory()
-	var segmented [][]session.Message
-	var currentRun []session.Message
+	raw := s.GetHistory()
+	var clean []map[string]any
 	for _, m := range raw {
 		if m.Role == "system" {
 			continue
 		}
-		if m.Role == "user" {
-			if currentRun != nil {
-				segmented = append(segmented, currentRun)
-			}
-			currentRun = []session.Message{m}
-		} else {
-			currentRun = append(currentRun, m)
+		entry := map[string]any{
+			"id":         m.ID,
+			"session_id": m.SessionID,
+			"role":       m.Role,
+			"parts":      m.Parts,
+			"created_at": m.CreatedAt,
 		}
-	}
-	if currentRun != nil {
-		segmented = append(segmented, currentRun)
-	}
-	var clean []map[string]any
-	for _, run := range segmented {
-		var userMsg *session.Message
-		var assistantMsgs []session.Message
-		for _, m := range run {
-			if m.Role == "user" {
-				userMsg = &m
-			} else if m.Role == "assistant" {
-				assistantMsgs = append(assistantMsgs, m)
+		if m.Metadata != nil {
+			entry["metadata"] = m.Metadata
+			if snap, ok := m.Metadata["snapshot"]; ok {
+				entry["snapshot"] = snap
+			}
+			if runMeta, ok := m.Metadata["run_meta"]; ok {
+				entry["run_meta"] = runMeta
 			}
 		}
-		if userMsg != nil {
-			content := ""
-			for _, p := range userMsg.Parts {
-				if p.Type == "text" {
-					content = p.Content
-					break
-				}
-			}
-			if idx := strings.Index(content, "User Request:"); idx >= 0 {
-				content = strings.TrimSpace(content[idx+len("User Request:"):])
-			}
-			entry := map[string]any{"role": "User", "content": content}
-			if userMsg.Metadata != nil {
-				if snap, ok := userMsg.Metadata["snapshot"]; ok {
-					entry["snapshot"] = snap
-				}
-			}
-			entry["id"] = userMsg.ID
-			clean = append(clean, entry)
-		}
-		if len(assistantMsgs) > 0 {
-			last := assistantMsgs[len(assistantMsgs)-1]
-			content := ""
-			for _, p := range last.Parts {
-				if p.Type == "text" {
-					content = p.Content
-				} else if p.Type == "tool_use" {
-					args := fmt.Sprint(p.Arguments)
-					// Never truncate args because the UI needs to parse the full JSON to render the widget
-					content += fmt.Sprintf("\n[Tool Call]\nTool: %s\nTool Input: %s\n[/Tool Call]\n", p.ToolName, args)
-				}
-			}
-			entry := map[string]any{"role": "Agent", "content": content}
-			if last.Metadata != nil {
-				if rm, ok := last.Metadata["run_meta"]; ok {
-					entry["run_meta"] = rm
-				}
-			}
-			clean = append(clean, entry)
-		}
+		clean = append(clean, entry)
 	}
 	return clean
 }
 
+
 type projectRegistry struct {
-	Projects []projectEntry `json:"projects"`
+	LastActive string         `json:"last_active"`
+	Projects   []projectEntry `json:"projects"`
 }
 
 func loadProjectRegistryPath() string {
@@ -380,7 +470,8 @@ func addLiveEvent(typ string, data map[string]any) {
 	eventsMu.Lock()
 	defer eventsMu.Unlock()
 	entry := map[string]any{
-		"type": typ,
+		"type":            typ,
+		"conversation_id": activeConversation,
 	}
 	for k, v := range data {
 		entry[k] = v
@@ -579,11 +670,32 @@ func buildTree(dirPath, workspaceRoot string) []map[string]any {
 
 
 
+var (
+	flagPassword string
+	flagPort     int
+	flagSSLPort  int
+	flagSSLCert  string
+	flagSSLKey   string
+)
+
 func main() {
+	var versionFlag bool
 	flag.BoolVar(&debugMode, "debug", false, "Enable verbose debug logging")
+	flag.BoolVar(&versionFlag, "version", false, "Print version information")
+	flag.StringVar(&flagPassword, "password", "", "Set UI password (overrides config)")
+	flag.IntVar(&flagPort, "port", 0, "Set HTTP port (overrides config)")
+	flag.IntVar(&flagSSLPort, "ssl_port", 0, "Set HTTPS port (overrides config)")
+	flag.StringVar(&flagSSLCert, "ssl_cert", "", "Set SSL certificate path (overrides config)")
+	flag.StringVar(&flagSSLKey, "ssl_key", "", "Set SSL key path (overrides config)")
 	flag.Parse()
+
+	if versionFlag {
+		fmt.Println("QuietForge v1.0.4")
+		os.Exit(0)
+	}
 	provider.Debug = debugMode
 	killZombieProcesses()
+	ensureProjectInit()
 
 	debugLog("main: starting with debug=%v", debugMode)
 	appCfg = loadCfg()
@@ -645,6 +757,23 @@ func main() {
 
 	activeConversation = "session_" + fmt.Sprintf("%d", time.Now().Unix())
 
+	pr := loadProjectRegistry()
+	if pr.LastActive != "" {
+		workspaceDir = pr.LastActive
+		os.Setenv("WORKSPACE_DIR", workspaceDir)
+		initWorkspace(workspaceDir)
+		if mcpManager != nil {
+			mcpManager.Workspace = workspaceDir
+		}
+	} else if len(pr.Projects) > 0 {
+		workspaceDir = pr.Projects[0].Path
+		os.Setenv("WORKSPACE_DIR", workspaceDir)
+		initWorkspace(workspaceDir)
+		if mcpManager != nil {
+			mcpManager.Workspace = workspaceDir
+		}
+	}
+
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -678,15 +807,27 @@ func main() {
 	setupStreamRoutes(api)
 
 	sslCert, sslKey := loadRawSSLConfig()
+	if flagSSLCert != "" {
+		sslCert = flagSSLCert
+	}
+	if flagSSLKey != "" {
+		sslKey = flagSSLKey
+	}
 	hasSSLCfg := sslCert != "" && sslKey != ""
 	port := 80
 	if appCfg.Port != nil {
 		port = *appCfg.Port
 	}
+	if flagPort > 0 {
+		port = flagPort
+	}
 	if hasSSLCfg {
 		port = 443
 		if appCfg.SSLPort != nil {
 			port = *appCfg.SSLPort
+		}
+		if flagSSLPort > 0 {
+			port = flagSSLPort
 		}
 	}
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
@@ -836,17 +977,36 @@ func registerTools() {
 	}
 }
 
+var contextLimitRegex = regexp.MustCompile(`(?i)(?:maximum\s+context\s+(?:length\s+)?is\s+(\d+)|(\d+)\s*>\s*(\d+)|(?:context\s+(?:length|window|size)).{0,40}?(\d+)\s*(?:token|character)?)`)
+
+func extractContextLimit(errStr string) int {
+	matches := contextLimitRegex.FindStringSubmatch(errStr)
+	if matches == nil {
+		return 0
+	}
+	if matches[1] != "" {
+		if n, err := strconv.Atoi(matches[1]); err == nil {
+			return n
+		}
+	}
+	if matches[3] != "" {
+		if n, err := strconv.Atoi(matches[3]); err == nil {
+			return n
+		}
+	}
+	if matches[4] != "" {
+		if n, err := strconv.Atoi(matches[4]); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
 func loadRawConfig() map[string]any {
 	for _, path := range config.ProjectConfigFiles(".") {
 		if raw := readJSONFile(path); raw != nil {
 			return raw
 		}
-	}
-	if raw := readJSONFile(filepath.Join(config.GlobalConfigDir(), "quietforge.json")); raw != nil {
-		return raw
-	}
-	if raw := readJSONFile("quietforge.json"); raw != nil {
-		return raw
 	}
 	return nil
 }
@@ -858,7 +1018,7 @@ func saveRawConfig(raw map[string]any) {
 		break
 	}
 	if path == "" {
-		path = filepath.Join(config.GlobalConfigDir(), "quietforge.json")
+		path = filepath.Join(".", ".quietforge", "config.json")
 	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, _ := json.MarshalIndent(raw, "", "  ")
@@ -880,6 +1040,9 @@ func resolveAgentForMode(mode string, rawCfg map[string]any) string {
 }
 
 func getConfigPassword() string {
+	if flagPassword != "" {
+		return flagPassword
+	}
 	for _, path := range config.ProjectConfigFiles(".") {
 		raw := readJSONFile(path)
 		if raw == nil {
@@ -1009,7 +1172,13 @@ func setupHealthRoutes(api fiber.Router) {
 			agentID = "build"
 		}
 		model := "gpt-4o"
-		if cfg.Model != nil {
+		if len(cfg.EnabledProviders) > 0 {
+			primaryID := cfg.EnabledProviders[0]
+			if pc, ok := cfg.Provider[primaryID]; ok && pc.Model != nil && *pc.Model != "" {
+				model = *pc.Model
+			}
+		}
+		if model == "gpt-4o" && cfg.Model != nil && *cfg.Model != "" {
 			model = *cfg.Model
 		}
 
@@ -1054,9 +1223,13 @@ func setupHealthRoutes(api fiber.Router) {
 			}
 			resp["projects"] = projects
 			resp["session_log"] = getSessionLog()
-			resp["live_events"] = liveEvents
+			eventsMu.Lock()
+			eventsCopy := make([]map[string]any, len(liveEvents))
+			copy(eventsCopy, liveEvents)
+			eventsMu.Unlock()
+			resp["live_events"] = eventsCopy
 			resp["artifacts"] = getArtifactsForUI(activePath)
-			resp["events"] = liveEvents
+			resp["events"] = eventsCopy
 		}
 
 		return c.JSON(resp)
@@ -1129,7 +1302,9 @@ func setupChatRoutes(api fiber.Router) {
 			}
 		}
 		activeConversation = "session_" + fmt.Sprintf("%d", time.Now().Unix())
+		sessionMu.Lock()
 		activeSession = nil
+		sessionMu.Unlock()
 		debugLog("/chat/new: conversation=%s agent=%s", activeConversation, payload.AgentID)
 		addLiveEvent("new_conversation", map[string]any{
 			"conversation_id": activeConversation,
@@ -1391,23 +1566,62 @@ func setupChatRoutes(api fiber.Router) {
 func setupConfigRoutes(api fiber.Router) {
 	api.Get("/config/llm", func(c *fiber.Ctx) error {
 		cfg := loadCfg()
-		apiKey := ""
-		baseURL := ""
-		providerName := "openai_compatible"
-		for pid, pc := range cfg.Provider {
-			providerName = pid
+		
+		type providerInfo struct {
+			ID            string `json:"id"`
+			Model         string `json:"model"`
+			BaseURL       string `json:"base_url"`
+			APIKey        string `json:"api_key"`
+			DisableVision bool   `json:"disable_vision"`
+			ContextWindow int    `json:"context_window"`
+			MaxMessages   int    `json:"max_messages"`
+		}
+		
+		var providers []providerInfo
+		
+		// Helper to add provider
+		addProv := func(pid string, pc config.ProviderConfig) {
+			key := ""
 			if pc.APIKey != nil {
-				apiKey = *pc.APIKey
+				key = *pc.APIKey
 			}
+			masked := ""
+			if len(key) > 8 {
+				masked = key[:8] + "..."
+			} else if len(key) > 0 {
+				masked = "***"
+			}
+			base := ""
 			if pc.BaseURL != nil {
-				baseURL = *pc.BaseURL
+				base = *pc.BaseURL
 			}
-			break
+			mdl := ""
+			if pc.Model != nil {
+				mdl = *pc.Model
+			}
+			dv := false
+			if pc.DisableVision != nil {
+				dv = *pc.DisableVision
+			}
+			cw := 0
+			if pc.ContextWindow != nil {
+				cw = *pc.ContextWindow
+			}
+			mm := 0
+			if pc.MaxMessages != nil {
+				mm = *pc.MaxMessages
+			}
+			providers = append(providers, providerInfo{
+				ID:            pid,
+				Model:         mdl,
+				BaseURL:       base,
+				APIKey:        masked,
+				DisableVision: dv,
+				ContextWindow: cw,
+				MaxMessages:   mm,
+			})
 		}
-		maskedKey := ""
-		if len(apiKey) > 8 {
-			maskedKey = apiKey[:8] + "..."
-		}
+		
 		model := "gpt-4o"
 		if cfg.Model != nil {
 			model = *cfg.Model
@@ -1441,82 +1655,163 @@ func setupConfigRoutes(api fiber.Router) {
 				contextWindow = int(v)
 			}
 		}
-		debugLog("GET /config/llm: provider=%s model=%s", providerName, model)
+
+		// Add in order of EnabledProviders if present
+		added := make(map[string]bool)
+		for _, pid := range cfg.EnabledProviders {
+			if pc, ok := cfg.Provider[pid]; ok {
+				addProv(pid, pc)
+				added[pid] = true
+			}
+		}
+		
+		// Add remaining
+		for pid, pc := range cfg.Provider {
+			if !added[pid] {
+				addProv(pid, pc)
+			}
+		}
+		
+		if len(providers) == 0 {
+			providers = append(providers, providerInfo{ID: "openai_compatible"})
+		}
+
+		// Apply global defaults to any provider missing them
+		for i := range providers {
+			if providers[i].Model == "" {
+				providers[i].Model = model
+			}
+			if providers[i].MaxMessages == 0 {
+				providers[i].MaxMessages = maxMessages
+			}
+			if providers[i].ContextWindow == 0 {
+				providers[i].ContextWindow = contextWindow
+			}
+		}
+
+		shellAccess := "allow"
+		if cfg.Permission != nil {
+			if v, ok := cfg.Permission["shell"].(map[string]any); ok {
+				if act, ok := v["action"].(string); ok && act == "ask" {
+					shellAccess = "ask"
+				}
+			}
+		}
+
+		debugLog("GET /config/llm: providers=%d model=%s shell_access=%s", len(providers), model, shellAccess)
 		return c.JSON(fiber.Map{
-			"provider":       providerName,
+			"providers":      providers,
 			"model":          model,
 			"temperature":    temperature,
-			"api_key":        maskedKey,
-			"base_url":       baseURL,
 			"max_messages":   maxMessages,
 			"context_window": contextWindow,
+			"shell_access":   shellAccess,
 		})
 	})
 
 	api.Post("/config/llm", func(c *fiber.Ctx) error {
-		payload := new(struct {
+		type provPayload struct {
+			ID            string `json:"id"`
 			Model         string `json:"model"`
 			APIKey        string `json:"api_key"`
 			BaseURL       string `json:"base_url"`
-			Provider      string `json:"provider"`
-			MaxMessages   int    `json:"max_messages"`
+			DisableVision bool   `json:"disable_vision"`
 			ContextWindow int    `json:"context_window"`
+			MaxMessages   int    `json:"max_messages"`
+		}
+		payload := new(struct {
+			Model         string        `json:"model"`
+			Providers     []provPayload `json:"providers"`
+			MaxMessages   int           `json:"max_messages"`
+			ContextWindow int           `json:"context_window"`
+			ShellAccess   string        `json:"shell_access"`
 		})
 		c.BodyParser(payload)
-		newModel := payload.Model
-		newKey := payload.APIKey
-		newBase := payload.BaseURL
-		debugLog("POST /config/llm: model=%s key_provided=%v base_url=%s max_messages=%d context_window=%d", newModel, newKey != "", newBase, payload.MaxMessages, payload.ContextWindow)
-
-		if newBase == "" {
-			newBase = "https://api.openai.com/v1"
-		}
-		if newKey != "" {
-			os.Setenv("OPENAI_API_KEY", newKey)
-		}
+		debugLog("POST /config/llm: model=%s providers=%d max_messages=%d shell_access=%s", payload.Model, len(payload.Providers), payload.MaxMessages, payload.ShellAccess)
 
 		rawCfg := loadRawConfig()
 		if rawCfg == nil {
 			rawCfg = make(map[string]any)
 		}
-		if newModel != "" {
-			rawCfg["model"] = newModel
+		if payload.Model != "" {
+			rawCfg["model"] = payload.Model
 		}
-		pid := payload.Provider
-		if pid == "" {
-			pid = "openai"
-		}
-		if newKey != "" && !strings.HasSuffix(newKey, "...") {
+
+		if len(payload.Providers) > 0 {
 			if _, ok := rawCfg["provider"].(map[string]any); !ok {
 				rawCfg["provider"] = make(map[string]any)
 			}
-			providers := rawCfg["provider"].(map[string]any)
-			pCfg := make(map[string]any)
-			if p, ok := providers[pid].(map[string]any); ok {
-				pCfg = p
+			provMap := rawCfg["provider"].(map[string]any)
+			
+			newProvMap := make(map[string]any)
+			var enabledProviders []string
+			
+			for i, p := range payload.Providers {
+				var newID string
+				if i == 0 {
+					newID = "primary"
+				} else {
+					newID = fmt.Sprintf("fallback_%d", i)
+				}
+				enabledProviders = append(enabledProviders, newID)
+				
+				pCfg := make(map[string]any)
+				if existing, ok := provMap[p.ID].(map[string]any); ok && p.ID != "" {
+					for k, v := range existing {
+						pCfg[k] = v
+					}
+				}
+				
+				if p.APIKey != "" && !strings.HasSuffix(p.APIKey, "...") {
+					pCfg["api_key"] = p.APIKey
+					if i == 0 {
+						os.Setenv("OPENAI_API_KEY", p.APIKey)
+					}
+				}
+				if p.BaseURL != "" {
+					pCfg["base_url"] = p.BaseURL
+				} else {
+					pCfg["base_url"] = "https://api.openai.com/v1"
+				}
+				if p.Model != "" {
+					pCfg["model"] = p.Model
+				}
+				pCfg["disable_vision"] = p.DisableVision
+				if p.ContextWindow > 0 {
+					pCfg["context_window"] = p.ContextWindow
+				} else {
+					delete(pCfg, "context_window")
+				}
+				if p.MaxMessages > 0 {
+					pCfg["max_messages"] = p.MaxMessages
+				} else {
+					delete(pCfg, "max_messages")
+				}
+				
+				newProvMap[newID] = pCfg
 			}
-			pCfg["api_key"] = newKey
-			if newBase != "" {
-				pCfg["base_url"] = newBase
-			}
-			providers[pid] = pCfg
-		} else if newBase != "" {
-			if _, ok := rawCfg["provider"].(map[string]any); !ok {
-				rawCfg["provider"] = make(map[string]any)
-			}
-			providers := rawCfg["provider"].(map[string]any)
-			pCfg := make(map[string]any)
-			if p, ok := providers[pid].(map[string]any); ok {
-				pCfg = p
-			}
-			pCfg["base_url"] = newBase
-			providers[pid] = pCfg
+			
+			rawCfg["provider"] = newProvMap
+
+			rawCfg["enabled_providers"] = enabledProviders
 		}
+
 		if payload.MaxMessages > 0 {
 			rawCfg["max_messages"] = payload.MaxMessages
 		}
 		if payload.ContextWindow > 0 {
 			rawCfg["context_window"] = payload.ContextWindow
+		}
+		if payload.ShellAccess != "" {
+			if _, ok := rawCfg["permission"].(map[string]any); !ok {
+				rawCfg["permission"] = make(map[string]any)
+			}
+			perm := rawCfg["permission"].(map[string]any)
+			if payload.ShellAccess == "ask" {
+				perm["shell"] = map[string]any{"action": "ask"}
+			} else {
+				perm["shell"] = map[string]any{"action": "allow"}
+			}
 		}
 		saveRawConfig(rawCfg)
 		appCfg = loadCfg()
@@ -1553,6 +1848,105 @@ func setupConfigRoutes(api fiber.Router) {
 		}
 		addLiveEvent("mode_change", fiber.Map{"mode": mode, "agent": agentID})
 		return c.JSON(fiber.Map{"ok": true, "mode": mode, "agent": agentID})
+	})
+
+	api.Get("/config/mcp", func(c *fiber.Ctx) error {
+		cfg := loadCfg()
+		if cfg.Mcp != nil {
+			return c.JSON(cfg.Mcp)
+		}
+		return c.JSON(fiber.Map{"servers": map[string]any{}})
+	})
+
+	api.Post("/config/mcp", func(c *fiber.Ctx) error {
+		payload := new(config.McpConfig)
+		if err := c.BodyParser(payload); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
+		}
+		
+		rawCfg := loadRawConfig()
+		if rawCfg == nil {
+			rawCfg = make(map[string]any)
+		}
+		
+		if payload.Servers != nil {
+			rawCfg["mcp"] = map[string]any{
+				"servers": payload.Servers,
+			}
+		} else {
+			delete(rawCfg, "mcp")
+		}
+		
+		saveRawConfig(rawCfg)
+		appCfg = loadCfg()
+		
+		// If engine is running, we might need to notify or restart MCP clients.
+		// For now, returning ok will prompt the UI to restart or they will be loaded on next run.
+		debugLog("POST /config/mcp: saved MCP settings")
+
+		if isEngineRunning() && mcpManager != nil {
+			var mcpServers []tool.McpServerDef
+			if payload.Servers != nil {
+				for name, sc := range payload.Servers {
+					if len(sc.Command) == 0 {
+						continue
+					}
+					mcpServers = append(mcpServers, tool.McpServerDef{
+						Name:        name,
+						Command:     sc.Command[0],
+						Args:        sc.Command[1:],
+						Environment: sc.Environment,
+						Disabled:    sc.Disabled,
+					})
+				}
+			}
+			go mcpManager.RestartServers(context.Background(), mcpServers)
+		}
+
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	api.Get("/config/compaction", func(c *fiber.Ctx) error {
+		cfg := loadCfg()
+		if cfg.Compaction != nil {
+			return c.JSON(cfg.Compaction)
+		}
+		// Default values
+		return c.JSON(fiber.Map{
+			"auto":                   false,
+			"tail_turns":             10,
+			"preserve_recent_tokens": 1000,
+			"reserved":               2000,
+			"prune":                  false,
+			"tool_truncation_limit":  10000,
+		})
+	})
+
+	api.Post("/config/compaction", func(c *fiber.Ctx) error {
+		payload := new(config.CompactionConfig)
+		if err := c.BodyParser(payload); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
+		}
+		
+		rawCfg := loadRawConfig()
+		if rawCfg == nil {
+			rawCfg = make(map[string]any)
+		}
+		
+		rawCfg["compaction"] = map[string]any{
+			"auto":                   payload.Auto,
+			"tail_turns":             payload.TailTurns,
+			"preserve_recent_tokens": payload.PreserveRecentTokens,
+			"reserved":               payload.Reserved,
+			"prune":                  payload.Prune,
+			"tool_truncation_limit":  payload.ToolTruncationLimit,
+		}
+		
+		saveRawConfig(rawCfg)
+		appCfg = loadCfg()
+		
+		debugLog("POST /config/compaction: saved Compaction settings")
+		return c.JSON(fiber.Map{"ok": true})
 	})
 }
 
@@ -1618,7 +2012,15 @@ func setupProjectRoutes(api fiber.Router) {
 		}
 		os.Setenv("WORKSPACE_DIR", targetFolder)
 		workspaceDir = targetFolder
+		if mcpManager != nil {
+			mcpManager.Workspace = targetFolder
+		}
 		initWorkspace(targetFolder)
+		
+		pr := loadProjectRegistry()
+		pr.LastActive = targetFolder
+		saveProjectRegistry(pr)
+		
 		activeSession = nil
 		project := registerProject(targetFolder)
 		loadLatestSession(targetFolder)
@@ -1649,7 +2051,15 @@ func setupProjectRoutes(api fiber.Router) {
 		
 		os.Setenv("WORKSPACE_DIR", targetFolder)
 		workspaceDir = targetFolder
+		if mcpManager != nil {
+			mcpManager.Workspace = targetFolder
+		}
 		initWorkspace(targetFolder)
+		
+		pr := loadProjectRegistry()
+		pr.LastActive = targetFolder
+		saveProjectRegistry(pr)
+		
 		activeSession = nil
 		// Load live events from disk
 		eventsMu.Lock()
@@ -1659,7 +2069,7 @@ func setupProjectRoutes(api fiber.Router) {
 		loadLatestSession(targetFolder)
 		sessionLog := getSessionLog()
 
-		pr := loadProjectRegistry()
+		pr = loadProjectRegistry()
 		projects := pr.Projects
 		for i, p := range projects {
 			pPath := p.Path
@@ -1889,6 +2299,24 @@ func setupWorkspaceRoutes(api fiber.Router) {
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
+
+	api.Post("/tool/approve", func(c *fiber.Ctx) error {
+		payload := new(struct {
+			CallID  string `json:"call_id"`
+			Approve bool   `json:"approve"`
+		})
+		if err := c.BodyParser(payload); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
+		}
+		if ch, ok := pendingToolApprovals.Load(payload.CallID); ok {
+			select {
+			case ch.(chan bool) <- payload.Approve:
+			default:
+			}
+			return c.JSON(fiber.Map{"success": true})
+		}
+		return c.Status(404).JSON(fiber.Map{"error": "Pending call not found"})
+	})
 }
 
 func setupToolRoutes(api fiber.Router) {
@@ -1912,35 +2340,80 @@ func setupToolRoutes(api fiber.Router) {
 
 	api.Post("/diagnostics/model-test", func(c *fiber.Ctx) error {
 		cfg := loadCfg()
-		client := clientFromCfg(cfg)
+		providerID := c.Query("provider")
+
+		var client *provider.Client
+		var displayName string
+
+		if providerID != "" {
+			pc, ok := cfg.Provider[providerID]
+			if !ok {
+				return c.Status(404).JSON(fiber.Map{"ok": false, "detail": fmt.Sprintf("Provider '%s' not found", providerID)})
+			}
+
+			globalModel := "gpt-4o"
+			if cfg.Model != nil {
+				globalModel = *cfg.Model
+			}
+
+			key := ""
+			if pc.APIKey != nil { key = *pc.APIKey }
+			base := ""
+			if pc.BaseURL != nil { base = *pc.BaseURL }
+			mdl := globalModel
+			if pc.Model != nil { mdl = *pc.Model }
+			dv := false
+			if pc.DisableVision != nil { dv = *pc.DisableVision }
+
+			inst := buildProviderInstance(providerID, key, base, mdl, dv)
+			if inst == nil {
+				return c.JSON(fiber.Map{"ok": false, "detail": "No API key configured for this provider"})
+			}
+			client = provider.NewMultiClient([]provider.ProviderInstance{*inst}, mdl)
+			displayName = providerID + " (" + mdl + ")"
+		} else {
+			client = clientFromCfg(cfg)
+			displayName = "primary"
+		}
+
+		start := time.Now()
 		prompt := c.Query("prompt")
 		if prompt == "" {
 			prompt = "Hello. Please reply with the word 'OK'."
 		}
+
 		raw := session.ToOpenAIMessages([]session.Message{
 			{Role: "user", Parts: []session.MessagePart{{Type: "text", Content: prompt}}, ID: "test", CreatedAt: time.Now().UnixMilli()},
-		}, appCfg.DisableVision)
+		}, false)
+
 		llmResp, err := client.Generate(context.Background(), raw, nil)
+		elapsed := time.Since(start).Seconds()
+
 		if err != nil {
 			return c.JSON(fiber.Map{
 				"ok":              false,
-				"provider":        "openai_compatible",
+				"provider":        displayName,
 				"detail":          fmt.Sprintf("Connection failed: %v", err),
-				"elapsed_seconds": 0.1,
+				"elapsed_seconds": elapsed,
 			})
 		}
+
 		return c.JSON(fiber.Map{
 			"ok":              true,
-			"provider":        "openai_compatible",
+			"provider":        displayName,
 			"detail":          fmt.Sprintf("Connection OK. Model: %s", llmResp.Model),
-			"elapsed_seconds": 0.1,
+			"elapsed_seconds": elapsed,
 		})
 	})
 }
 
 func setupMiscRoutes(api fiber.Router) {
 	api.Get("/timeline/export", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"events": liveEvents})
+		eventsMu.Lock()
+		eventsCopy := make([]map[string]any, len(liveEvents))
+		copy(eventsCopy, liveEvents)
+		eventsMu.Unlock()
+		return c.JSON(fiber.Map{"events": eventsCopy})
 	})
 
 	api.Post("/open-file", func(c *fiber.Ctx) error {
@@ -2296,7 +2769,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 	if len(permRules) == 0 {
 		permRules = permission.AllowAll
 	}
-	sp := session.NewSessionProcessor(toolRegistry, permRules, nil, workspace)
+	sp := session.NewSessionProcessor(toolRegistry, permRules, askPermissionCallback, workspace)
 	sp.SnapHash = snapHash
 	var fullContent string
 
@@ -2325,8 +2798,25 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		schemas := buildToolSchemas(agentID)
 		pm.SystemPrompt = pm.BuildSystemPrompt(agentID, schemas, workspace)
 
-		history := pm.PrepareMessages(ctx, agentID, 128000, client, func(state string) {})
-		oaMsgs := session.ToOpenAIMessages(history, appCfg.DisableVision)
+		ctxWindow := 2000000
+		
+		if len(appCfg.EnabledProviders) > 0 {
+			primaryID := appCfg.EnabledProviders[0]
+			if pCfg, ok := appCfg.Provider[primaryID]; ok && pCfg.ContextWindow != nil && *pCfg.ContextWindow > 0 {
+				ctxWindow = *pCfg.ContextWindow
+			}
+		}
+		
+		if ctxWindow == 2000000 && appCfg.ContextWindow != nil && *appCfg.ContextWindow > 0 {
+			ctxWindow = *appCfg.ContextWindow
+		} else if ctxWindow == 2000000 {
+			if mInfo, ok := provider.ResolveModel(*appCfg.Model); ok {
+				ctxWindow = mInfo.Context
+			}
+		}
+
+		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {})
+		oaMsgs := session.ToOpenAIMessages(history, false)
 		
 		toolDefs := buildOpenAIToolDefs(agentID)
 		streamCh, err := client.Stream(ctx, oaMsgs, toolDefs)
@@ -2383,6 +2873,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 			astMsg.Parts = append(astMsg.Parts, session.MessagePart{Type: "text", Content: "API error: " + err.Error()})
 		}
 		subSession.AddMessage(astMsg)
+		promoteFallbackProvider(client, nil)
 		subSession.Save()
 
 		if len(toolCalls) == 0 {
@@ -2498,6 +2989,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	if sessionRepo == nil {
 		sessionRepo = repo
 	}
+	sessionMu.Lock()
 	activeSession = session.NewSession(activeConversation, sessionRepo, agentID, configToDict(appCfg), workspace)
 	debugLog("runEngine: workspace=%s sessionID=%s", workspace, activeSession.SessionID)
 	if err := activeSession.Load(); err != nil {
@@ -2508,6 +3000,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	if agentID != "" {
 		activeSession.SetAgent(agentID)
 	}
+	sessionMu.Unlock()
 
 	// Create git snapshot before run
 	if workspace != "" {
@@ -2536,9 +3029,10 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	if len(permRules) == 0 {
 		permRules = permission.AllowAll
 	}
-	sp := session.NewSessionProcessor(toolRegistry, permRules, nil, workspace)
+	sp := session.NewSessionProcessor(toolRegistry, permRules, askPermissionCallback, workspace)
 	sp.SnapHash = snapHash
 	var fullContent string
+	var originalCtxWindow int
 
 	var i int
 	for i = 0; i < 150; i++ {
@@ -2575,10 +3069,31 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 		pm.SystemPrompt = sysPrompt
 
-		history := pm.PrepareMessages(ctx, agentID, 128000, client, func(state string) {
+		ctxWindow := 2000000
+		
+		if len(appCfg.EnabledProviders) > 0 {
+			primaryID := appCfg.EnabledProviders[0]
+			if pCfg, ok := appCfg.Provider[primaryID]; ok && pCfg.ContextWindow != nil && *pCfg.ContextWindow > 0 {
+				ctxWindow = *pCfg.ContextWindow
+			}
+		}
+		
+		if ctxWindow == 2000000 && appCfg.ContextWindow != nil && *appCfg.ContextWindow > 0 {
+			ctxWindow = *appCfg.ContextWindow
+		} else if ctxWindow == 2000000 {
+			if mInfo, ok := provider.ResolveModel(*appCfg.Model); ok {
+				ctxWindow = mInfo.Context
+			}
+		}
+
+		if i == 0 {
+			originalCtxWindow = ctxWindow
+		}
+
+		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
 			addLiveEvent("activity", map[string]any{"event": state})
 		})
-		oaMsgs := session.ToOpenAIMessages(history, appCfg.DisableVision)
+		oaMsgs := session.ToOpenAIMessages(history, false)
 		debugLog("runEngine: cycle %d prepared %d messages", i, len(oaMsgs))
 
 		var cycleContent string
@@ -2600,18 +3115,43 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			debugLog("runEngine: cycle %d stream failed: %v", i, err)
 		}
 		if err == nil {
+			isReasoning := false
+			hasReceivedReasoning := false
 		streamLoop:
 			for {
 				select {
 				case evt, ok := <-streamCh:
 					if !ok {
+						if isReasoning {
+							isReasoning = false
+							cycleContent += "\n</think>\n"
+							fullContent += "\n</think>\n"
+							thoughtBuffer += "\n</think>\n"
+						}
 						break streamLoop
 					}
 					switch evt.Type {
-					case "text":
+					case "reasoning":
+						if !isReasoning {
+							isReasoning = true
+							cycleContent += "<think>\n"
+							fullContent += "<think>\n"
+						}
+						hasReceivedReasoning = true
 						cycleContent += evt.Text
 						fullContent += evt.Text
 						thoughtBuffer += evt.Text
+					case "text":
+						if isReasoning {
+							isReasoning = false
+							cycleContent += "\n</think>\n"
+							fullContent += "\n</think>\n"
+						}
+						cycleContent += evt.Text
+						fullContent += evt.Text
+						if !hasReceivedReasoning {
+							thoughtBuffer += evt.Text
+						}
 					case "tool_use":
 						if !hasToolCall {
 							hasToolCall = true
@@ -2635,7 +3175,25 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					break streamLoop
 				}
 			}
+			if isReasoning {
+				isReasoning = false
+				cycleContent += "\n</think>\n"
+				fullContent += "\n</think>\n"
+			}
 		}
+		
+		// Deduplicate proxy <think> mirroring
+		if strings.Count(cycleContent, "<think>") > 1 {
+			// If the proxy mirrored reasoning_content into content, we strip the second one
+			cycleContent = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(cycleContent, "$1")
+			thoughtBuffer = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(thoughtBuffer, "$1")
+		}
+
+		// Fix DeepSeek R1 random <think> omissions
+		if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
+			cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
+		}
+
 		debugLog("runEngine: cycle %d stream done: content=%d toolCalls=%d", i, len(cycleContent), len(toolCalls))
 
 		select {
@@ -2660,18 +3218,22 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			if gErr != nil {
 				errStr := strings.ToLower(gErr.Error())
 				if (strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "context window") || strings.Contains(errStr, "max length") || strings.Contains(errStr, "prompt exceeds")) && i < 49 {
-					debugLog("runEngine: cycle %d context window exceeded, pruning history and retrying", i)
-					addLiveEvent("activity", map[string]any{"event": "⚠️ Context Window Exceeded! Auto-compacting history to recover..."})
-					hist := activeSession.GetHistory()
-					if len(hist) > 1 {
-						pruned := session.PruneMessages(hist, configToDict(appCfg), 4000)
-						if len(pruned) < len(hist) {
-							activeSession.ReplaceMessages(pruned)
-							activeSession.Save()
-							debugLog("runEngine: cycle %d pruned %d -> %d messages, retrying", i, len(hist), len(pruned))
-							goto retryCycle
-						}
+					debugLog("runEngine: cycle %d context window exceeded, reducing ctxWindow and retrying", i)
+					addLiveEvent("activity", map[string]any{"event": "⚠️ Context Window Exceeded! Reducing context window and retrying..."})
+					if limit := extractContextLimit(errStr); limit > 0 && limit < ctxWindow {
+						ctxWindow = limit
+					} else {
+						ctxWindow = ctxWindow / 2
 					}
+					if ctxWindow < 10000 {
+						ctxWindow = 10000
+					}
+					history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
+						addLiveEvent("activity", map[string]any{"event": state})
+					})
+					oaMsgs = session.ToOpenAIMessages(history, false)
+					debugLog("runEngine: cycle %d reduced ctxWindow to %d, retrying", i, ctxWindow)
+					goto retryCycle
 				}
 				errMsg := fmt.Sprintf("LLM Error: %s", gErr.Error())
 				debugLog("runEngine: cycle %d Generate() error: %v", i, gErr)
@@ -2708,13 +3270,32 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				activeSession.AddMessage(assistantMsg)
 				return
 			}
-			cycleContent = resp.Content
-			fullContent += resp.Content
+			cycleContent = ""
+			if resp.Reasoning != "" {
+				cycleContent += "<think>\n" + resp.Reasoning + "\n</think>\n"
+			}
+			cycleContent += resp.Content
+			
+			// Deduplicate proxy <think> mirroring
+			if strings.Count(cycleContent, "<think>") > 1 {
+				cycleContent = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(cycleContent, "$1")
+			}
+			
+			// Fix DeepSeek R1 random <think> omissions
+			if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
+				cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
+			}
+			
+			fullContent += cycleContent
 			hasToolCall = len(resp.ToolCalls) > 0
 			debugLog("runEngine: cycle %d Generate() response: content=%d toolCalls=%d", i, len(cycleContent), len(resp.ToolCalls))
 			if hasToolCall {
-				if cycleContent != "" {
-					addLiveEvent("think", map[string]any{"text": cycleContent, "event": cycleContent})
+				tb := resp.Reasoning
+				if tb == "" {
+					tb = resp.Content
+				}
+				if tb != "" {
+					addLiveEvent("think", map[string]any{"text": tb, "event": tb})
 				}
 			} else {
 				if cycleContent != "" {
@@ -2745,9 +3326,18 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			})
 		}
 		activeSession.AddMessage(assistantMsg)
+		promoteFallbackProvider(client, addLiveEvent)
 
 		if len(toolCalls) == 0 {
 			debugLog("runEngine: cycle %d no tool calls, breaking loop", i)
+			if originalCtxWindow > 0 && ctxWindow < originalCtxWindow {
+				debugLog("runEngine: saving reduced ctxWindow=%d to config", ctxWindow)
+				if rawCfg := loadRawConfig(); rawCfg != nil {
+					rawCfg["context_window"] = ctxWindow
+					saveRawConfig(rawCfg)
+					appCfg = loadCfg()
+				}
+			}
 			break
 		}
 
@@ -2875,15 +3465,21 @@ func stopBackgroundProcesses() {
 }
 
 func getPromptTokens() int {
-	if activeSession != nil {
-		return activeSession.PromptTokens
+	sessionMu.RLock()
+	s := activeSession
+	sessionMu.RUnlock()
+	if s != nil {
+		return s.PromptTokens
 	}
 	return 0
 }
 
 func getCompletionTokens() int {
-	if activeSession != nil {
-		return activeSession.CompletionTokens
+	sessionMu.RLock()
+	s := activeSession
+	sessionMu.RUnlock()
+	if s != nil {
+		return s.CompletionTokens
 	}
 	return 0
 }
@@ -3120,4 +3716,91 @@ func dirExists(path string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func ensureProjectInit() {
+	qfDir := ".quietforge"
+	if _, err := os.Stat(qfDir); os.IsNotExist(err) {
+		log.Printf("Initializing new QuietForge project in current directory...")
+		if err := os.MkdirAll(qfDir, 0755); err != nil {
+			log.Printf("Warning: failed to create %s: %v", qfDir, err)
+			return
+		}
+		
+		configPath := filepath.Join(qfDir, "config.json")
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			defaultConfig := []byte(`{
+  "agent": {
+    "build": {
+      "description": "Primary coding agent with full tool access"
+    },
+    "explore": {
+      "description": "Fast codebase exploration agent"
+    },
+    "plan": {
+      "description": "Research and planning agent (read-only tools)"
+    }
+  },
+  "compaction": {
+    "auto": true,
+    "preserve_recent_tokens": 4000,
+    "prune": true,
+    "reserved": 4000,
+    "tail_turns": 3,
+    "tool_truncation_limit": 2000
+  },
+  "context_window": 1000000,
+  "default_agent": "build",
+  "disable_vision": true,
+  "instructions": [],
+  "intent_mode": "plan",
+  "max_messages": 200,
+  "mcp": {
+    "servers": {
+      "playwright": {
+        "command": [
+          "npx",
+          "-y",
+          "@playwright/mcp@latest",
+          "--isolated"
+        ],
+        "type": "local"
+      }
+    }
+  },
+  "model": "gpt-4o",
+  "permission": {
+    "apply_patch": "allowed",
+    "ast_search": "allowed",
+    "edit": "allowed",
+    "glob": "allowed",
+    "grep": "allowed",
+    "invalid": "allowed",
+    "lsp": "allowed",
+    "plan_exit": "allowed",
+    "playwright__*": "allowed",
+    "question": "allowed",
+    "read": "allowed",
+    "shell": "allowed",
+    "skill": "allowed",
+    "task": "allowed",
+    "todowrite": "allowed",
+    "webfetch": "allowed",
+    "websearch": "allowed",
+    "write": "allowed"
+  },
+  "shell": {
+    "cwd": null,
+    "timeout": 120000
+  },
+  "username": null
+}`)
+			os.WriteFile(configPath, defaultConfig, 0644)
+		}
+		
+		wsDir := "workspace"
+		if _, err := os.Stat(wsDir); os.IsNotExist(err) {
+			os.MkdirAll(wsDir, 0755)
+		}
+	}
 }

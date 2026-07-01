@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 
@@ -269,7 +270,10 @@ func (s *Session) AddMessage(message Message) error {
 				}(),
 			}
 		}
-		return s.Repo.CreateMessage(msgRow, partRows)
+		if err := s.Repo.CreateMessage(msgRow, partRows); err != nil {
+			log.Printf("AddMessage: failed to persist message %s: %v", message.ID, err)
+			return err
+		}
 	}
 	return nil
 }

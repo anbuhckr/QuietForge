@@ -75,8 +75,6 @@ func ProjectConfigFiles(startDir string) []string {
 
 	for {
 		for _, name := range []string{
-			"quietforge.json",
-			"quietforge.jsonc",
 			filepath.Join(".quietforge", "config.json"),
 		} {
 			p := filepath.Join(current, name)

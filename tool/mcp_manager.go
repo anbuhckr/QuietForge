@@ -92,6 +92,8 @@ func (s *mcpSession) readLine() (string, error) {
 	return "", s.sc.Err()
 }
 
+const mcpCallTimeout = 5 * time.Minute
+
 func (s *mcpSession) call(method string, params any) (json.RawMessage, error) {
 	s.mu.Lock()
 	s.seq++
@@ -121,7 +123,24 @@ func (s *mcpSession) call(method string, params any) (json.RawMessage, error) {
 		return nil, err
 	}
 
-	line, err := s.readLine()
+	type readResult struct {
+		line string
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		line, err := s.readLine()
+		ch <- readResult{line, err}
+	}()
+
+	var line string
+	select {
+	case r := <-ch:
+		line, err = r.line, r.err
+	case <-time.After(mcpCallTimeout):
+		s.cancel()
+		return nil, fmt.Errorf("MCP call timed out after %v", mcpCallTimeout)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("no response: %w", err)
 	}
@@ -250,6 +269,7 @@ type McpManager struct {
 	mu        sync.Mutex
 	wg        sync.WaitGroup
 	Workspace string
+	cancel    context.CancelFunc
 }
 
 func NewMcpManager(registry *Registry) *McpManager {
@@ -272,6 +292,11 @@ type McpServerDef struct {
 }
 
 func (m *McpManager) ConnectServers(ctx context.Context, servers []McpServerDef) {
+	ctx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.cancel = cancel
+	m.mu.Unlock()
+
 	for _, srv := range servers {
 		if srv.Disabled {
 			continue
@@ -282,6 +307,20 @@ func (m *McpManager) ConnectServers(ctx context.Context, servers []McpServerDef)
 		m.wg.Add(1)
 		go m.runServer(ctx, srv)
 	}
+}
+
+func (m *McpManager) RestartServers(ctx context.Context, servers []McpServerDef) {
+	m.Close()
+	m.mu.Lock()
+	m.servers = make(map[string]McpServerDef)
+	m.sessions = make(map[string]*mcpSession)
+	for _, t := range m.registry.GetAll() {
+		if _, ok := t.(*mcpDynamicTool); ok {
+			m.registry.RemoveTool(t.ID())
+		}
+	}
+	m.mu.Unlock()
+	m.ConnectServers(ctx, servers)
 }
 
 func (m *McpManager) startMcpSession(ctx context.Context, srv McpServerDef, ws string) (*mcpSession, error) {
@@ -355,10 +394,20 @@ func (m *McpManager) callTool(ctx context.Context, serverName, toolName string, 
 	}
 	m.mu.Unlock()
 
-	return session.call("tools/call", map[string]any{
+	result, err := session.call("tools/call", map[string]any{
 		"name":      toolName,
 		"arguments": args,
 	})
+	if err != nil {
+		m.mu.Lock()
+		if m.sessions[serverName] == session {
+			session.close()
+			delete(m.sessions, serverName)
+		}
+		m.mu.Unlock()
+		return nil, err
+	}
+	return result, nil
 }
 
 func (m *McpManager) runServer(ctx context.Context, srv McpServerDef) {
@@ -438,6 +487,9 @@ func (m *McpManager) runServer(ctx context.Context, srv McpServerDef) {
 
 func (m *McpManager) Close() {
 	m.mu.Lock()
+	if m.cancel != nil {
+		m.cancel()
+	}
 	for _, s := range m.sessions {
 		s.close()
 	}

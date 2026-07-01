@@ -151,5 +151,16 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 		sanitized = append(sanitized, msg)
 	}
 
+	// 3. Ensure no message has an empty Content string to prevent 'omitempty' dropping the field
+	for i := range sanitized {
+		if sanitized[i].Content == "" {
+			if sanitized[i].Role == "tool" {
+				sanitized[i].Content = "(empty)"
+			} else {
+				sanitized[i].Content = " " // Single space satisfies strict schema validators
+			}
+		}
+	}
+
 	return sanitized
 }

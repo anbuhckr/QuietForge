@@ -130,6 +130,20 @@ func parseConfig(data map[string]any) Config {
 		if baseURL, ok := pc["base_url"].(string); ok {
 			pConf.BaseURL = &baseURL
 		}
+		if model, ok := pc["model"].(string); ok {
+			pConf.Model = &model
+		}
+		if dv, ok := pc["disable_vision"].(bool); ok {
+			pConf.DisableVision = &dv
+		}
+		if cw, ok := pc["context_window"].(float64); ok {
+			cwInt := int(cw)
+			pConf.ContextWindow = &cwInt
+		}
+		if mm, ok := pc["max_messages"].(float64); ok {
+			mmInt := int(mm)
+			pConf.MaxMessages = &mmInt
+		}
 		if opts, ok := pc["options"].(map[string]any); ok {
 			pConf.Options = opts
 		} else {
@@ -228,6 +242,28 @@ func parseConfig(data map[string]any) Config {
 	if shell, ok := data["shell"].(string); ok {
 		cfg.Shell = &shell
 	}
+	if comp, ok := data["compaction"].(map[string]any); ok {
+		c := &CompactionConfig{}
+		if auto, ok := comp["auto"].(bool); ok {
+			c.Auto = auto
+		}
+		if tail, ok := comp["tail_turns"].(float64); ok {
+			c.TailTurns = int(tail)
+		}
+		if preserve, ok := comp["preserve_recent_tokens"].(float64); ok {
+			c.PreserveRecentTokens = int(preserve)
+		}
+		if reserved, ok := comp["reserved"].(float64); ok {
+			c.Reserved = int(reserved)
+		}
+		if prune, ok := comp["prune"].(bool); ok {
+			c.Prune = prune
+		}
+		if trunc, ok := comp["tool_truncation_limit"].(float64); ok {
+			c.ToolTruncationLimit = int(trunc)
+		}
+		cfg.Compaction = c
+	}
 	if username, ok := data["username"].(string); ok {
 		cfg.Username = &username
 	}
@@ -258,35 +294,6 @@ func parseConfig(data map[string]any) Config {
 
 func loadGlobalConfig() Config {
 	result := make(map[string]any)
-
-	if os.Getenv("QUIETFORGE_CONFIG") == "" && os.Getenv("QUIETFORGE_CONFIG_DIR") == "" {
-		configDir := GlobalConfigDir()
-		os.MkdirAll(configDir, 0755)
-		mainFile := GlobalConfigFile()
-		if _, err := os.Stat(mainFile); os.IsNotExist(err) {
-			os.WriteFile(mainFile, []byte(`{"$schema":"https://quietforge.ai/config.json"}`+"\n"), 0644)
-		}
-	}
-
-	var filesToLoad []string
-	configDir := GlobalConfigDir()
-	for _, fname := range []string{"config.json", "quietforge.json", "quietforge.jsonc"} {
-		p := filepath.Join(configDir, fname)
-		if _, err := os.Stat(p); err == nil {
-			filesToLoad = append(filesToLoad, p)
-		}
-	}
-
-	if envPath := os.Getenv("QUIETFORGE_CONFIG"); envPath != "" {
-		filesToLoad = append(filesToLoad, envPath)
-	}
-
-	for _, path := range filesToLoad {
-		if data := loadJSONFile(path); data != nil {
-			result = deepMerge(result, data)
-		}
-	}
-
 	return parseConfig(result)
 }
 
@@ -295,13 +302,6 @@ func loadProjectConfig(startDir string) Config {
 
 	for _, path := range ProjectConfigFiles(startDir) {
 		if data := loadJSONFile(path); data != nil {
-			result = deepMerge(result, data)
-		}
-	}
-
-	if envContent := os.Getenv("QUIETFORGE_CONFIG_CONTENT"); envContent != "" {
-		var data map[string]any
-		if err := json.Unmarshal([]byte(envContent), &data); err == nil {
 			result = deepMerge(result, data)
 		}
 	}
@@ -324,6 +324,18 @@ func configToDict(cfg Config) map[string]any {
 			if v.BaseURL != nil {
 				pd["base_url"] = *v.BaseURL
 			}
+			if v.Model != nil {
+				pd["model"] = *v.Model
+			}
+			if v.DisableVision != nil {
+				pd["disable_vision"] = *v.DisableVision
+			}
+			if v.ContextWindow != nil {
+				pd["context_window"] = *v.ContextWindow
+			}
+			if v.MaxMessages != nil {
+				pd["max_messages"] = *v.MaxMessages
+			}
 			pd["options"] = v.Options
 			providers[k] = pd
 		}
@@ -343,16 +355,34 @@ func configToDict(cfg Config) map[string]any {
 		d["disabled_providers"] = cfg.DisabledProviders
 	}
 	if cfg.EnabledProviders != nil {
-		d["enabled_providers"] = cfg.EnabledProviders
+		epAny := make([]any, len(cfg.EnabledProviders))
+		for i, v := range cfg.EnabledProviders {
+			epAny[i] = v
+		}
+		d["enabled_providers"] = epAny
 	}
 	if cfg.Shell != nil {
 		d["shell"] = *cfg.Shell
+	}
+	if cfg.Compaction != nil {
+		comp := make(map[string]any)
+		comp["auto"] = cfg.Compaction.Auto
+		comp["tail_turns"] = float64(cfg.Compaction.TailTurns)
+		comp["preserve_recent_tokens"] = float64(cfg.Compaction.PreserveRecentTokens)
+		comp["reserved"] = float64(cfg.Compaction.Reserved)
+		comp["prune"] = cfg.Compaction.Prune
+		comp["tool_truncation_limit"] = float64(cfg.Compaction.ToolTruncationLimit)
+		d["compaction"] = comp
 	}
 	if cfg.Username != nil {
 		d["username"] = *cfg.Username
 	}
 	if len(cfg.Instructions) > 0 {
-		d["instructions"] = cfg.Instructions
+		instAny := make([]any, len(cfg.Instructions))
+		for i, v := range cfg.Instructions {
+			instAny[i] = v
+		}
+		d["instructions"] = instAny
 	}
 	if cfg.DefaultAgent != nil {
 		d["default_agent"] = *cfg.DefaultAgent

@@ -15,11 +15,14 @@ type ModelConfig struct {
 	Variant    *string `json:"variant,omitempty"`
 }
 
-// ProviderConfig handles authentication and base URLs.
 type ProviderConfig struct {
-	APIKey  *string                `json:"api_key,omitempty"`
-	BaseURL *string                `json:"base_url,omitempty"`
-	Options map[string]any 			`json:"options"`
+	Model         *string                `json:"model,omitempty"`
+	APIKey        *string                `json:"api_key,omitempty"`
+	BaseURL       *string                `json:"base_url,omitempty"`
+	DisableVision *bool                  `json:"disable_vision,omitempty"`
+	ContextWindow *int                   `json:"context_window,omitempty"`
+	MaxMessages   *int                   `json:"max_messages,omitempty"`
+	Options       map[string]any 		 `json:"options"`
 }
 
 // AgentConfig represents agent-specific configuration.
@@ -62,6 +65,7 @@ type McpConfig struct {
 // Config is the top-level configuration object.
 type Config struct {
 	Model             *string                    `json:"model,omitempty"`
+	ContextWindow     *int                       `json:"context_window,omitempty"`
 	Provider          map[string]ProviderConfig  `json:"provider"`
 	Agent             map[string]AgentConfig     `json:"agent"`
 	Permission        map[string]any     		 `json:"permission"`
@@ -74,7 +78,8 @@ type Config struct {
 	Instructions      []string                   `json:"instructions"`
 	DefaultAgent      *string                    `json:"default_agent,omitempty"`
 	Mode              map[string]any     		 `json:"mode"`
-	DisableVision     bool                       `json:"disable_vision"`
 	Port              *int                       `json:"port,omitempty"`
 	SSLPort           *int                       `json:"ssl_port,omitempty"`
+	SSLCert           *string                    `json:"ssl_cert,omitempty"`
+	SSLKey            *string                    `json:"ssl_key,omitempty"`
 }

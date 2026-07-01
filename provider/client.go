@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -28,6 +29,7 @@ type Usage struct {
 
 type LLMResponse struct {
 	Content      string
+	Reasoning   string
 	ToolCalls    []ToolCall
 	Usage         *Usage
 	Model         string
@@ -41,11 +43,19 @@ type StreamEvent struct {
 	Usage    *Usage
 }
 
+type ProviderInstance struct {
+	ID            string
+	Client        *openai.Client
+	Model         string
+	DisableVision bool
+}
+
 type Client struct {
-	openaiClient   *openai.Client
-	Model          string
-	knownMaxTokens int
-	mu             sync.RWMutex
+	clients              []ProviderInstance
+	Model                string // global default model
+	knownMaxTokens       int
+	SuccessfulProviderID string
+	mu                   sync.RWMutex
 }
 
 func NewClient(apiKey, baseURL, model string) *Client {
@@ -54,19 +64,41 @@ func NewClient(apiKey, baseURL, model string) *Client {
 		config.BaseURL = baseURL
 	}
 	return &Client{
-		openaiClient: openai.NewClientWithConfig(config),
-		Model:        model,
+		clients: []ProviderInstance{
+			{Client: openai.NewClientWithConfig(config), Model: model},
+		},
+		Model: model,
+	}
+}
+
+func NewMultiClient(clients []ProviderInstance, model string) *Client {
+	return &Client{
+		clients: clients,
+		Model:   model,
 	}
 }
 
 func (c *Client) RawClient() *openai.Client {
-	return c.openaiClient
+	if len(c.clients) > 0 {
+		return c.clients[0].Client
+	}
+	return nil
+}
+
+func (c *Client) GetSuccessfulProviderID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.SuccessfulProviderID
 }
 
 func (c *Client) Generate(ctx context.Context, messages []openai.ChatCompletionMessage, tools []openai.Tool) (*LLMResponse, error) {
 	if Debug {
 		log.Printf("[DEBUG] Generate: model=%s messages=%d tools=%d", c.Model, len(messages), len(tools))
 	}
+	if len(c.clients) == 0 {
+		return nil, fmt.Errorf("no LLM provider configured or no API key provided")
+	}
+
 	req := openai.ChatCompletionRequest{
 		Model:       c.Model,
 		Messages:    messages,
@@ -86,39 +118,98 @@ func (c *Client) Generate(ctx context.Context, messages []openai.ChatCompletionM
 	}
 	c.mu.RUnlock()
 
-	for retries := 0; retries < 5; retries++ {
-		resp, err = c.openaiClient.CreateChatCompletion(ctx, req)
-		if err == nil {
-			if req.MaxTokens > 0 {
-				c.mu.Lock()
-				c.knownMaxTokens = req.MaxTokens
-				c.mu.Unlock()
-			}
-			break
+	for _, instance := range c.clients {
+		req.Model = instance.Model
+		if req.Model == "" {
+			req.Model = c.Model
 		}
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "422") || strings.Contains(errStr, "max_tokens") {
-			if req.MaxTokens == 0 {
-				req.MaxTokens = maxTokensLimit
-			} else {
-				req.MaxTokens /= 2
+		
+		if instance.DisableVision {
+			req.Messages = stripVision(messages)
+		} else {
+			req.Messages = messages
+		}
+
+		for retries := 0; ; retries++ {
+			resp, err = instance.Client.CreateChatCompletion(ctx, req)
+			if err == nil {
+				c.mu.Lock()
+				if req.MaxTokens > 0 {
+					c.knownMaxTokens = req.MaxTokens
+				}
+				c.SuccessfulProviderID = instance.ID
+				c.mu.Unlock()
+				break
 			}
-			if req.MaxTokens < 256 {
+			
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "messages parameter") {
+				break
+			}
+			if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid api key") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many") {
+				if retries >= 2 {
+					break
+				}
+				if Debug {
+					log.Printf("[DEBUG] Hard error: %v, retrying (Attempt %d/3) before fallback", err, retries+1)
+				}
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				case <-time.After(3 * time.Second):
+				}
+				if err != nil && err == ctx.Err() {
+					break
+				}
+				continue
+			}
+			
+			if strings.Contains(errStr, "422") || strings.Contains(errStr, "max_tokens") {
+				if req.MaxTokens == 0 {
+					req.MaxTokens = maxTokensLimit
+				} else {
+					req.MaxTokens /= 2
+				}
+				if req.MaxTokens < 256 {
+					break
+				}
+				if Debug {
+					log.Printf("[DEBUG] Generate 422 error, retrying with MaxTokens=%d", req.MaxTokens)
+				}
+				continue
+			}
+			
+			if retries >= 2 {
 				break
 			}
 			if Debug {
-				log.Printf("[DEBUG] Generate 422 error, retrying with MaxTokens=%d", req.MaxTokens)
+				log.Printf("[DEBUG] Generate transient error: %v, retrying in 3 seconds (Attempt %d)", err, retries+1)
 			}
-			continue
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+			if err != nil && err == ctx.Err() {
+				break
+			}
 		}
-		break
-	}
-
-	if err != nil {
+		
+		if err == nil {
+			break
+		}
+		
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "messages parameter") {
 			return nil, fmt.Errorf("context window exceeded: %w", err)
 		}
+		
+		if Debug {
+			log.Printf("[DEBUG] Provider attempt failed, falling back. Error: %v", err)
+		}
+	}
+
+	if err != nil {
 		if Debug {
 			log.Printf("[DEBUG] Generate error: %v", err)
 		}
@@ -131,6 +222,7 @@ func (c *Client) Generate(ctx context.Context, messages []openai.ChatCompletionM
 
 	choice := resp.Choices[0]
 	result.Content = choice.Message.Content
+	result.Reasoning = choice.Message.ReasoningContent
 	result.FinishReason = string(choice.FinishReason)
 
 	for _, tc := range choice.Message.ToolCalls {
@@ -179,41 +271,100 @@ func (c *Client) Stream(ctx context.Context, messages []openai.ChatCompletionMes
 	}
 	c.mu.RUnlock()
 
-	for retries := 0; retries < 5; retries++ {
-		stream, err = c.openaiClient.CreateChatCompletionStream(ctx, req)
-		if err == nil {
-			if req.MaxTokens > 0 {
-				c.mu.Lock()
-				c.knownMaxTokens = req.MaxTokens
-				c.mu.Unlock()
-			}
-			break
+	for _, instance := range c.clients {
+		req.Model = instance.Model
+		if req.Model == "" {
+			req.Model = c.Model
 		}
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "422") || strings.Contains(errStr, "max_tokens") {
-			if req.MaxTokens == 0 {
-				req.MaxTokens = maxTokensLimit
-			} else {
-				req.MaxTokens /= 2
+
+		if instance.DisableVision {
+			req.Messages = stripVision(messages)
+		} else {
+			req.Messages = messages
+		}
+
+		for retries := 0; ; retries++ {
+			stream, err = instance.Client.CreateChatCompletionStream(ctx, req)
+			if err == nil {
+				c.mu.Lock()
+				if req.MaxTokens > 0 {
+					c.knownMaxTokens = req.MaxTokens
+				}
+				c.SuccessfulProviderID = instance.ID
+				c.mu.Unlock()
+				break
 			}
-			if req.MaxTokens < 256 {
+			
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "messages parameter") {
+				break
+			}
+			if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid api key") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many") {
+				if retries >= 2 {
+					break
+				}
+				if Debug {
+					log.Printf("[DEBUG] Hard error: %v, retrying (Attempt %d/3) before fallback", err, retries+1)
+				}
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				case <-time.After(3 * time.Second):
+				}
+				if err != nil && err == ctx.Err() {
+					break
+				}
+				continue
+			}
+			
+			if strings.Contains(errStr, "422") || strings.Contains(errStr, "max_tokens") {
+				if req.MaxTokens == 0 {
+					req.MaxTokens = maxTokensLimit
+				} else {
+					req.MaxTokens /= 2
+				}
+				if req.MaxTokens < 256 {
+					break
+				}
+				if Debug {
+					log.Printf("[DEBUG] Stream 422 error, retrying with MaxTokens=%d", req.MaxTokens)
+				}
+				continue
+			}
+			
+			if retries >= 2 {
 				break
 			}
 			if Debug {
-				log.Printf("[DEBUG] Stream 422 error, retrying with MaxTokens=%d", req.MaxTokens)
+				log.Printf("[DEBUG] Stream transient error: %v, retrying in 3 seconds (Attempt %d)", err, retries+1)
 			}
-			continue
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+			if err != nil && err == ctx.Err() {
+				break
+			}
 		}
-		break
+		
+		if err == nil {
+			break
+		}
+		
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "messages parameter") {
+			return nil, fmt.Errorf("context window exceeded: %w", err)
+		}
+		
+		if Debug {
+			log.Printf("[DEBUG] Stream attempt failed, falling back. Error: %v", err)
+		}
 	}
 
 	if err != nil {
 		if Debug {
 			log.Printf("[DEBUG] Stream error: %v", err)
-		}
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "messages parameter") {
-			return nil, fmt.Errorf("context window exceeded: %w", err)
 		}
 		return nil, err
 	}
@@ -247,9 +398,11 @@ func (c *Client) Stream(ctx context.Context, messages []openai.ChatCompletionMes
 			if len(resp.Choices) > 0 {
 				delta := resp.Choices[0].Delta
 
+				if delta.ReasoningContent != "" {
+					eventChan <- StreamEvent{Type: "reasoning", Text: delta.ReasoningContent}
+				}
 				if delta.Content != "" {
 					eventChan <- StreamEvent{Type: "text", Text: delta.Content}
-					eventCount++
 				}
 
 				for _, tc := range delta.ToolCalls {
@@ -316,4 +469,23 @@ func (c *Client) Stream(ctx context.Context, messages []openai.ChatCompletionMes
 	}()
 
 	return eventChan, nil
+}
+
+func stripVision(msgs []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
+	var stripped []openai.ChatCompletionMessage
+	for _, m := range msgs {
+		newMsg := m
+		if len(m.MultiContent) > 0 {
+			var newParts []openai.ChatMessagePart
+			for _, p := range m.MultiContent {
+				if p.Type == openai.ChatMessagePartTypeImageURL {
+					continue
+				}
+				newParts = append(newParts, p)
+			}
+			newMsg.MultiContent = newParts
+		}
+		stripped = append(stripped, newMsg)
+	}
+	return stripped
 }

@@ -21,7 +21,7 @@ let running = false,
   _notifQueued = false,
   activeSuggestion = 0,
   lastUserMsg = null,
-  inlineLiveEl = null,
+  /* removed inlineLiveEl */
   pendingFolders = [],
   projectSelected = false,
   sseSource = null;
@@ -262,597 +262,555 @@ if (window.marked && window.hljs && window.markedHighlight) {
   }));
 }
 
-function addMsg(role, txt, opts) {
-  const isUser = role.toLowerCase() === 'user';
-  let chat = document.getElementById('chat');
-  let turnGroup = chat.lastElementChild;
-  if (isUser || !turnGroup || !turnGroup.classList.contains('chat-turn')) {
-    turnGroup = document.createElement('div');
-    turnGroup.className = 'chat-turn';
-    chat.appendChild(turnGroup);
-  }
-
-  const d = document.createElement('div');
-  d.className = 'msg ' + (isUser ? 'user' : 'agent');
-  if (opts && opts.message_id) d.dataset.messageId = opts.message_id;
-  let content = esc(txt);
-  if (role.toLowerCase() === 'user') {
-    content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
-    content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
-      return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
-    });
-  } else if (role.toLowerCase() === 'agent' && window.marked) {
-    let cleaned = txt.replace(/\[(?:Compat )?Tool Call\]\nTool: (.*)\nTool Input: ([\s\S]*?)\n\[\/Tool Call\]/g, (m, t, j) => {
-      try {
-        let a = JSON.parse(j);
-        let s = [];
-        for (let k in a) {
-          let v = a[k];
-          if (typeof v === 'string' && (v.includes('/') || v.includes('\\')) && !v.includes('\n')) {
-            v = v.split(/[\\/]/).pop()
-          }
-          if (typeof v === 'object' && v !== null) {
-            v = JSON.stringify(v);
-            if (v.length > 50) v = v.substring(0, 50) + '...';
-          }
-          s.push(`${k}="${v}"`)
-        }
-        return `\n<div class="inline-live flat-live" style="margin: 8px 0;"><div class="live-log"><div class="live-entry markdown-body action-entry" style="animation: none;"><p>⚙️ ${t} ${s.join(' ')}</p></div></div></div>\n`
-      } catch (e) {
-        return m
-      }
-    });
-    // Catch LLM hallucinations where it imitates the prompt's "> ⚙ ..." format
-    cleaned = cleaned.replace(/^>\s*⚙\s*(.*)$/gm, (m, rest) => {
-      return `\n<div class="inline-live flat-live"><div class="live-log"><div class="live-entry markdown-body action-entry" style="animation: none;"><p>⚙️ ${rest}</p></div></div></div>\n`
-    });
-    // Parse <think> tags from DeepSeek R1 and similar models
-    cleaned = cleaned.replace(/<think>([\s\S]*?)<\/think>/g, (m, thought) => {
-      return `\n<details class="llm-thought"><summary>🧠 Thought Process</summary><div class="llm-thought-content">\n\n${thought}\n\n</div></details>\n`;
-    });
-    content = md(cleaned)
-  }
-  d.innerHTML = `<div class="label">${esc(role)}</div><div class="bubble markdown-body">${content}</div>`;
-  if (isUser && opts && opts.snapshot) {
-    const btn = document.createElement('button');
-    btn.className = 'revert-btn';
-    btn.title = 'Revert workspace to this point';
-    btn.textContent = '\u21B6';
-    btn.dataset.messageId = opts.message_id;
-    btn.onclick = async () => {
-      const r = await fetch('/api/chat/revert', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message_id: opts.message_id})
-      });
-      if (r.ok) {
-        const data = await r.json();
-        renderSession(data.session_log || []); // Render the log immediately
-        refresh(); // Call refresh in the background just to update tokens and artifacts
-      }
-    };
-    d.querySelector('.label').after(btn);
-  }
-  turnGroup.appendChild(d);
-  if (isUser) {
-    lastUserMsg = d;
-    inlineLiveEl = null;
-    currentLiveContainer = null
-  }
-  updateStickyPrompts();
-  $('chat').scrollTop = $('chat').scrollHeight;
-  return d
-}
-
-function createLiveTextRow(text) {
-  const row = document.createElement('details');
-  row.className = 'inline-live';
-  row.open = false;
-  row.dataset.isToolBlock = 'false';
-  row.dataset.structuredLive = 'true';
-  row.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;"></span><span class="timer" style="margin-left:8px; opacity:0.6; font-variant-numeric: tabular-nums;"></span></summary><div class="live-log" style="margin-top:8px; padding-left:16px; font-size:13px; color:var(--text-muted); display:flex; flex-direction:column; gap:4px; font-family:var(--font-mono); max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: #3f424b transparent;"></div>`;
-  row.querySelector('.livetext').textContent = String(text || '').substring(0, 220);
-  row.addEventListener('toggle', () => {
-    const arrow = row.querySelector('summary span');
-    if (arrow) arrow.style.transform = row.open ? 'rotate(0deg)' : 'rotate(-90deg)';
-  });
-  return row;
-}
-
-function renderPersistedRunMeta(meta) {
-  const events = Array.isArray(meta && meta.live_events) ? meta.live_events : [];
-  if (!events.length) return;
-  const container = document.createElement('div');
-  container.className = 'live-container compacted';
-  container.dataset.compacted = 'true';
-  container.style.display = 'flex';
-  container.style.flexDirection = 'column';
-  container.style.gap = '6px';
-  container.style.marginBottom = '10px';
-  container.style.marginTop = '2px';
-
-  const eventsToCompact = [];
-  const eventsToKeep = [];
-
-  events.forEach(evt => {
-    const rawText = typeof evt === 'string' ? evt : (evt.text || evt.event || evt.message || evt.error);
-    if (!rawText) return;
-    let kind = (typeof evt === 'string' ? 'activity' : evt.type) || 'activity';
-    const lower = rawText.toLowerCase();
-    if (kind === 'error' || lower.startsWith('created artifact:') || lower.startsWith('artifact ')) {
-      eventsToKeep.push(evt);
-    } else {
-      eventsToCompact.push(evt);
-    }
-  });
-
-  if (eventsToCompact.length > 0) {
-    const details = document.createElement('details');
-    details.className = 'inline-live live-compact';
-    details.open = false;
-    details.innerHTML = `<summary><span class="compact-label">Worked for ${esc(formatRunDuration(Number(meta.duration_ms || 0)))}</span><span class="compact-arrow">›</span></summary><div class="compact-log"></div>`;
-    const log = details.querySelector('.compact-log');
-    let currentInlineEl = null;
-
-    eventsToCompact.forEach(evt => {
-      let rawText = typeof evt === 'string' ? evt : (evt.text || evt.event || evt.message || evt.error);
-      let kind = (typeof evt === 'string' ? 'activity' : evt.type) || 'activity';
-      if (kind === 'done' || (!['think', 'action'].includes(kind) && isNoisyLiveText(rawText))) return;
-      if (kind !== 'think' && kind !== 'action') kind = 'action';
-
-      let skipAppend = false;
-      if (kind === 'action' && rawText) {
-        if (rawText.startsWith('Executing: ')) {
-          rawText = rawText.replace(/^Executing:\s*/, '⚙️ ');
-        } else if (rawText.startsWith('✓ ') || rawText.startsWith('✗ ')) {
-          const match = rawText.match(/^[✓✗]\s+([a-zA-Z0-9_]+)/);
-          if (match && log) {
-            const toolName = match[1];
-            const detailsNodes = [...log.querySelectorAll('details.inline-live')];
-            for (let i = detailsNodes.length - 1; i >= 0; i--) {
-              const d = detailsNodes[i];
-              const summarySpan = d.querySelector('summary .livetext');
-              if (summarySpan && summarySpan.textContent.startsWith('⚙️ ' + toolName + ' ')) {
-                const isSuccess = rawText.startsWith('✓');
-                let updatedText = summarySpan.textContent.replace('⚙️ ', isSuccess ? '✓ ' : '✗ ');
-                if (!isSuccess) {
-                  const errStr = rawText.substring(`✗ ${toolName}: `.length);
-                  updatedText += ': ' + errStr;
-                }
-                summarySpan.textContent = updatedText;
-                const entry = d.querySelector('.live-entry');
-                if (entry) {
-                  entry.textContent = updatedText;
-                }
-                skipAppend = true;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      if (skipAppend) return;
-
-      let isStructuredLive = true;
-      let title = '';
-
-      const liveLabels = {
-        think: 'Thinking',
-        action: 'Action',
-        response: 'Finalizing'
-      };
-
-      if (kind === 'action') {
-        title = rawText.split('\n')[0].substring(0, 100);
-      } else {
-        title = (liveLabels[kind] || 'Thinking') + '...';
-      }
-
-      let forceNew = false;
-      if (kind === 'think' || kind === 'action') {
-        forceNew = true;
-      }
-
-      if (forceNew || !currentInlineEl) {
-        currentInlineEl = document.createElement('details');
-        currentInlineEl.className = 'inline-live flat-live';
-        currentInlineEl.open = true;
-        currentInlineEl.dataset.structuredLive = 'true';
-        if (kind !== 'action') {
-          currentInlineEl.dataset.liveKind = kind;
-        }
-        currentInlineEl.dataset.hasAction = (kind === 'action') ? 'true' : 'false';
-        currentInlineEl.innerHTML = `<summary><span class="livetext">${esc(title)}</span><span class="timer"></span></summary><div class="live-log"></div>`;
-        log.appendChild(currentInlineEl);
-      } else {
-        if (kind === 'action') currentInlineEl.dataset.hasAction = 'true';
-      }
-
-      const logContainer = currentInlineEl.querySelector('.live-log');
-      if (logContainer) {
-        const entry = document.createElement('div');
-        entry.className = 'live-entry markdown-body';
-        if (kind === 'action') entry.classList.add('action-entry');
-        if (kind === 'think') {
-          entry.textContent = rawText;
-          entry.style.cssText = 'white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;';
-        } else {
-          entry.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(marked.parse(rawText)) : esc(rawText);
-        }
-        logContainer.appendChild(entry);
-      }
-    });
-
-    if (log.children.length > 0) {
-      container.appendChild(details);
-    }
-  }
-
-  eventsToKeep.forEach(evt => {
-    const rawText = typeof evt === 'string' ? evt : (evt.text || evt.event || evt.message || evt.error);
-    let kind = (typeof evt === 'string' ? 'activity' : evt.type) || 'activity';
-    const row = document.createElement('details');
-    row.className = 'inline-live flat-live';
-    row.open = true;
-    row.dataset.structuredLive = 'true';
-    if (kind === 'error') {
-      row.classList.add('error');
-      row.innerHTML = `<summary><span class="livetext" style="color: #ff4d4d;">❌ ${esc(rawText)}</span><span class="timer"></span></summary><div class="live-log"></div>`;
-    } else {
-      row.innerHTML = `<summary><span class="livetext">${esc(rawText)}</span><span class="timer"></span></summary><div class="live-log"></div>`;
-    }
-    container.appendChild(row);
-  });
-
-  if (container.children.length > 0) {
-    lastUserMsg ? lastUserMsg.insertAdjacentElement('afterend', container) : $('chat').appendChild(container);
-  }
-}
-
-function renderSession(log = []) {
-  $('chat').innerHTML = '';
-  lastUserMsg = null;
-  inlineLiveEl = null;
-  currentLiveContainer = null;
-  if (!log.length) {
-    addMsg('System', 'Ready. Mention workspace context with @todo.py, @recent, @diff.');
-    return
-  }
-  log.forEach(m => {
-    if (String(m.role || 'Agent').toLowerCase() !== 'user' && m.run_meta) {
-      renderPersistedRunMeta(m.run_meta);
-    }
-    const msgEl = addMsg(m.role || 'Agent', m.content || '', (m.role === 'User' && m.snapshot) ? { snapshot: m.snapshot, message_id: m.id } : undefined);
-    if (String(m.role || 'Agent').toLowerCase() !== 'user' && m.run_meta && m.run_meta.workspace_changes) {
-      let changedFiles = [];
-      const wc = m.run_meta.workspace_changes;
-      if (wc.created) changedFiles.push(...wc.created);
-      if (wc.modified) changedFiles.push(...wc.modified);
-      
-      if (changedFiles.length > 0 && window.latestArtifacts) {
-        let relevantDiffs = matchingDiffArtifactsForChangedFiles(changedFiles);
-        if (relevantDiffs.length > 0) {
-           renderDiffReviewWidget(msgEl, relevantDiffs);
-        }
-      }
-    }
-  });
-  updateStickyPrompts();
-}
-let runStartTime = 0,
-  runTimerInterval = null;
-let inlineLiveLog = null;
 
 function chatIsNearBottom(threshold = 90) {
   const c = $('chat');
-  return c.scrollHeight - c.clientHeight <= c.scrollTop + threshold
+  return c.scrollHeight - c.clientHeight <= c.scrollTop + threshold;
 }
 
 function scrollChatToBottom() {
   const c = $('chat');
-  c.scrollTop = c.scrollHeight
+  c.scrollTop = c.scrollHeight;
 }
-let currentLiveContainer = null;
 
-function ensureInlineLive(forceNew = false, title = "Processing...") {
-  if (!forceNew && inlineLiveEl && document.body.contains(inlineLiveEl)) return inlineLiveEl;
-  if (forceNew && inlineLiveEl) {
-    // Keep it expanded during the run. compactLiveTranscript will collapse them at the end.
-    inlineLiveEl.classList.remove('running');
+let runStartTime = 0, runTimerInterval = null;
+
+class ConversationState {
+  constructor() {
+    this.turns = []; 
   }
 
-  if (!currentLiveContainer || !document.body.contains(currentLiveContainer)) {
-    currentLiveContainer = document.createElement('div');
-    currentLiveContainer.className = 'live-container';
-    currentLiveContainer.style.display = 'flex';
-    currentLiveContainer.style.flexDirection = 'column';
-    currentLiveContainer.style.gap = '0';
-    currentLiveContainer.style.marginBottom = '16px';
-    currentLiveContainer.style.marginTop = '-8px';
-    lastUserMsg ? lastUserMsg.insertAdjacentElement('afterend', currentLiveContainer) : $('chat').appendChild(currentLiveContainer);
-  }
-
-  const d = document.createElement('details');
-  d.className = 'inline-live';
-  d.style.marginTop = '0';
-  d.open = true;
-  d.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;"></span><span class="timer" style="margin-left:8px; opacity:0.6; font-variant-numeric: tabular-nums;"></span></summary><div class="live-log" style="margin-top:2px; padding-left:0; font-size:13px; color:var(--text-muted); display:flex; flex-direction:column; gap:2px; font-family:var(--font-mono); max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: #3f424b transparent;"></div>`;
-
-  // Add rotation listener for the custom arrow
-  d.addEventListener('toggle', (e) => {
-    const arrow = d.querySelector('summary span');
-    if (arrow) arrow.style.transform = d.open ? 'rotate(0deg)' : 'rotate(-90deg)';
-  });
-
-  currentLiveContainer.appendChild(d);
-  inlineLiveEl = d;
-  inlineLiveLog = d.querySelector('.live-log');
-  return d;
-}
-
-function updateTimer() {
-  if (!running || !inlineLiveEl) return;
-  const s = Math.floor((Date.now() - runStartTime) / 1000);
-  const tEl = inlineLiveEl.querySelector('.timer');
-  if (tEl) tEl.textContent = `[${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}]`;
-}
-
-function formatRunDuration(ms) {
-  const seconds = Math.max(1, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
-}
-
-function compactLiveTranscript(durationMs) {
-  if (!currentLiveContainer || currentLiveContainer.dataset.compacted === 'true') return;
-  const rowsToCompact = [];
-  const rowsToKeep = [];
-  
-  [...currentLiveContainer.children].forEach(el => {
-    if (!el.classList || !el.classList.contains('inline-live')) return;
-    
-    // Check if it's "Created artifact:"
-    const lt = el.querySelector('.livetext');
-    const text = (lt ? lt.textContent : '').trim().toLowerCase();
-    if (text.startsWith('created artifact:') || text.startsWith('artifact ')) {
-      rowsToKeep.push(el);
-      return;
+  _currentTurn() {
+    if (this.turns.length === 0) {
+      this.turns.push({ user: null, agent: null, liveContainer: [], completed: false, durationMs: 0 });
     }
-    
-    // Skip generic "Thinking..."/"Processing..." spinners that have no real timeline content
-    if (!el.dataset.structuredLive && !el.dataset.hasAction) {
-      if (!text || text === 'processing...' || text.startsWith('thinking')) {
-        if (el.parentNode) el.parentNode.removeChild(el);
-        return;
-      }
-    }
-    rowsToCompact.push(el);
-  });
-
-  if (!rowsToCompact.length && !rowsToKeep.length) {
-    if (currentLiveContainer.parentNode) currentLiveContainer.parentNode.removeChild(currentLiveContainer);
-    currentLiveContainer = null;
-    return;
+    return this.turns[this.turns.length - 1];
   }
 
-  currentLiveContainer.innerHTML = '';
-
-  if (rowsToCompact.length > 0) {
-    const details = document.createElement('details');
-    details.className = 'inline-live live-compact';
-    details.open = false;
-    details.innerHTML = `<summary><span class="compact-label">Worked for ${esc(formatRunDuration(durationMs))}</span><span class="compact-arrow">›</span></summary><div class="compact-log"></div>`;
-    const log = details.querySelector('.compact-log');
-    rowsToCompact.forEach(row => {
-      row.classList.remove('running');
-      row.classList.add('flat-live');
-      row.open = true;
-      log.appendChild(row);
-    });
-    currentLiveContainer.appendChild(details);
-    inlineLiveEl = details;
-    inlineLiveLog = log;
+  clear() {
+    this.turns = [];
+    this.render();
   }
 
-  rowsToKeep.forEach(row => {
-    row.classList.remove('running');
-    currentLiveContainer.appendChild(row);
-  });
+  formatToolCall(rawStr) {
+     const spaceIdx = rawStr.indexOf(' ');
+     if (spaceIdx === -1) return rawStr;
+     const toolName = rawStr.substring(0, spaceIdx);
+     const argStr = rawStr.substring(spaceIdx + 1);
+     try {
+         const args = JSON.parse(argStr);
+         let s = [];
+         
+         if (toolName === 'view_file' || toolName === 'read_file' || toolName === 'read') {
+             let f = args.AbsolutePath || args.path || args.TargetFile || args.filePath || args.filepath || '';
+             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+             let start = args.StartLine || args.start || '';
+             let end = args.EndLine || args.end || '';
+             if (start && end) return `${toolName} ${f} ${start}-${end}`;
+             if (start) return `${toolName} ${f} ${start}-...`;
+             return `${toolName} ${f}`;
+         } else if (toolName === 'replace_file_content' || toolName === 'multi_replace_file_content' || toolName === 'write_to_file' || toolName === 'write_file' || toolName === 'edit' || toolName === 'write') {
+             let f = args.TargetFile || args.AbsolutePath || args.path || args.filePath || args.filepath || '';
+             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+             return `${toolName} ${f}`;
+         } else if (toolName === 'grep_search' || toolName === 'grep' || toolName === 'search' || toolName === 'glob') {
+             let f = args.SearchPath || args.path || args.filePath || args.filepath || args.DirectoryPath || '';
+             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+             return `${toolName} "${args.Query || args.query || args.pattern || '*'}" in ${f}`;
+         } else if (toolName === 'list_dir' || toolName === 'list') {
+             let f = args.DirectoryPath || args.path || args.filePath || args.filepath || '';
+             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+             return `list ${f}`;
+         } else if (toolName === 'run_command' || toolName === 'command' || toolName === 'run') {
+             return `run ${args.CommandLine || args.command || args.cmd || ''}`;
+         }
 
-  currentLiveContainer.dataset.compacted = 'true';
-  currentLiveContainer.classList.add('compacted');
-  inlineLiveEl = null;
-  inlineLiveLog = null;
-}
-
-function isNoisyLiveText(text) {
-  const t = String(text || '').trim().toLowerCase();
-  return !t ||
-    t.startsWith('auto-summarizing') ||
-    t.startsWith('thinking') ||
-    t.startsWith('building prompt') ||
-    t.startsWith('tool cache hit') ||
-    t.startsWith('phase:') ||
-    t.startsWith('reading file:') ||
-    t.startsWith('reading ') ||
-    t.startsWith('scanning workspace') ||
-    t.startsWith('searching codebase:') ||
-    t.startsWith('semantic search:') ||
-    t.startsWith('smart context search:') ||
-    t.startsWith('deterministic verification') ||
-    t.startsWith('verification strategy') ||
-    t.startsWith('code reviewer checking') ||
-    t.startsWith('workspace created:') ||
-    t.startsWith('workspace modified:') ||
-    t.startsWith('continuation attempt') ||
-    t.startsWith('sub-agent') ||
-    t.includes('tool budget exceeded') ||
-    t.includes('continuation budget exceeded') ||
-    t.includes('loop guard blocked') ||
-    t.includes('you already called');
-}
-
-function pruneNoisyLiveEntries() {
-  if (!inlineLiveLog) return;
-  [...inlineLiveLog.children].forEach(entry => {
-    if (isNoisyLiveText(entry.dataset.rawText || entry.textContent)) entry.remove();
-  });
-}
-
-function updateInlineLive(text, state = 'running', opts = {}) {
-  const shouldFollow = chatIsNearBottom();
-  const rawText = String(text || '');
-  const liveKind = opts.kind || '';
-  const liveLabels = {
-    think: 'Thinking',
-    action: 'Action',
-    response: 'Response'
-  };
-  const isStructuredLive = !!liveLabels[liveKind];
-  const isToolResult = /^\[[0-9.]+s\]/.test(rawText);
-
-  const pathRegex = /(?:[A-Za-z]:[\\/][^\s"']+|[\\/][^\s"']+|\.env\b|[a-zA-Z0-9_.-]+\.(?:py|js|ts|jsx|tsx|css|html|json|md|txt|csv|yaml|yml|sh|bash|cpp|c|h|hpp|rs|go|java|xml|ini|cfg|conf)\b)/gi;
-  let compactText = (isNoisyLiveText(rawText) && !isStructuredLive ? 'Thinking' : rawText).replace(pathRegex, m => (m.includes('/') || m.includes('\\')) ? m.split(/[\\/]/).pop() : m);
-
-  let title = "Processing...";
-  if (isStructuredLive) {
-    if (liveKind === 'action') {
-      title = compactText.split('\n')[0].substring(0, 100);
-    } else {
-      title = liveLabels[liveKind] + '...';
-    }
-  } else if (isToolResult) {
-    title = rawText.split('\n')[0].replace(/\*\*/g, '').replace(/^\[[0-9.]+s\]\s*/, '').substring(0, 80);
-  } else if (!isNoisyLiveText(rawText)) {
-    title = rawText.substring(0, 50);
+         for (let k in args) {
+             let v = args[k];
+             if (typeof v === 'string') {
+                 if (v.includes('\n') || v.length > 50) {
+                     v = v.replace(/\n/g, '\\n');
+                     if (v.length > 50) v = v.substring(0, 50) + '...';
+                 } else if (v.includes('/') || v.includes('\\')) {
+                     v = v.split(/[\\/]/).pop();
+                 }
+             } else if (typeof v === 'object' && v !== null) {
+                 v = JSON.stringify(v);
+                 if (v.length > 50) v = v.substring(0, 50) + '...';
+             } else {
+                 v = String(v);
+             }
+             if (typeof v === 'string' && !v.startsWith('"') && !v.startsWith('[')) {
+                 v = `"${v}"`;
+             }
+             s.push(v);
+         }
+         return `${toolName} ${s.join(' ')}`;
+     } catch(e) {
+         return rawStr;
+     }
   }
 
-  let forceNew = false;
-  if (isStructuredLive) {
-    if (liveKind === 'think') {
-      // Reuse existing placeholder from processStatus instead of force-new
-      if (inlineLiveEl) {
-        const lt = inlineLiveEl.querySelector('.livetext');
-        const t = lt ? lt.textContent.trim().toLowerCase() : '';
-        forceNew = !(t === 'thinking' || t === 'processing...');
-      } else {
-        forceNew = true;
-      }
-    }
-    // Actions stay inside the current think block (no separate dot)
-  } else if (isToolResult) {
-    forceNew = false;
-    if (inlineLiveEl) inlineLiveEl.dataset.hasToolResult = 'true';
-  } else {
-    if (inlineLiveEl && inlineLiveEl.dataset.hasToolResult === 'true') {
-      forceNew = true;
-    }
+  addSystemMsg(txt) {
+    this.turns.push({ system: txt });
+    this.render();
   }
 
-  const d = ensureInlineLive(forceNew, title);
-  if (forceNew) {
-    d.dataset.hasToolResult = 'false';
-    d.dataset.liveKind = liveKind || '';
-    d.dataset.hasAction = 'false';
-  }
-  
-  if (isStructuredLive) {
-    d.dataset.structuredLive = 'true';
-    if (forceNew || liveKind === 'think') d.dataset.liveKind = liveKind;
-    if (liveKind === 'action') d.dataset.hasAction = 'true';
-    d.classList.add('flat-live');
-  }
+  loadDb(messages) {
+    this.turns = [];
+    document.getElementById('chat').innerHTML = '';
+    messages.forEach(msg => {
+      const role = String(msg.role || '').toLowerCase();
+      const parts = msg.parts || [];
+      
+      if (role === 'user') {
+        // A new user message implies the previous turn's tool loop is finished.
+        if (this.turns.length > 0) {
+            this.turns[this.turns.length - 1].completed = true;
+        }
 
-  if (state === 'running') {
-    d.classList.add('running')
-  } else {
-    d.classList.remove('running')
-  }
-  if (rawText.includes('❌')) {
-    d.classList.add('error');
-    d.querySelector('.livetext').style.color = '#ff4d4d';
-  }
-
-  if (isStructuredLive) {
-    d.querySelector('.livetext').textContent = title;
-    d.open = true;
-  } else if (!isToolResult) {
-    d.querySelector('.livetext').textContent = compactText;
-    d.open = true;
-  }
-
-  pruneNoisyLiveEntries();
-  
-  // Custom logic to handle action deduplication and formatting
-  let finalRawText = rawText;
-  let skipAppend = false;
-  if (liveKind === 'action' && finalRawText) {
-    if (finalRawText.startsWith('Executing: ')) {
-      finalRawText = finalRawText.replace(/^Executing:\s*/, '⚙️ ');
-    } else if (finalRawText.startsWith('✓ ') || finalRawText.startsWith('✗ ')) {
-      const match = finalRawText.match(/^[✓✗]\s+([a-zA-Z0-9_]+)/);
-      if (match && inlineLiveLog) {
-        const toolName = match[1];
-        const actionNodes = [...inlineLiveLog.querySelectorAll('.action-entry')];
-        for (let i = actionNodes.length - 1; i >= 0; i--) {
-          const node = actionNodes[i];
-          if (node.textContent.startsWith('⚙️ ' + toolName + ' ')) {
-            const isSuccess = finalRawText.startsWith('✓');
-            let updatedText = node.textContent.replace('⚙️ ', isSuccess ? '✓ ' : '✗ ');
-            if (!isSuccess) {
-              const errStr = finalRawText.substring(`✗ ${toolName}: `.length);
-              updatedText += ': ' + errStr;
-            }
-            // Update node
-            node.textContent = updatedText;
-            skipAppend = true;
-            break;
+        const isCompaction = parts.some(p => p.type === 'compaction');
+        const isToolResult = parts.some(p => p.type === 'tool_result' || (p.type === 'text' && p.content && p.content.match(/^\[.*? Result\]\n/)));
+        if (isCompaction) {
+          const turn = this._currentTurn();
+          if (turn.liveContainer.length === 0) {
+            turn.liveContainer.push({ think: null, tools: [] });
           }
+          turn.liveContainer[turn.liveContainer.length - 1].tools.push('compacting...');
+        } else if (isToolResult) {
+          // Do nothing, this is just a tool result in the middle of a turn's tool loop
+        } else {
+          this.turns.push({
+            user: parts[0]?.content || '',
+            agent: null,
+            liveContainer: [],
+            completed: false,
+            durationMs: msg.run_meta ? (msg.run_meta.duration_ms || 0) : 0,
+            messageId: msg.id,
+            snapshot: msg.snapshot
+          });
+        }
+      } else if (role === 'assistant') {
+        const turn = this._currentTurn();
+        if (parts.length === 1 && parts[0].type === 'text') {
+          let content = parts[0].content;
+          let hasCompatTools = content.includes('Tool Call]');
+          
+          if (hasCompatTools) {
+              const regex = /([\s\S]*?)\[(?:Compat )?Tool Call\]\nTool: (.*)\nTool Input: ([\s\S]*?)\n\[\/Tool Call\]/g;
+              let lastIndex = 0;
+              let match;
+              while ((match = regex.exec(content)) !== null) {
+                  const think = match[1].trim();
+                  const toolName = match[2];
+                  const toolInput = match[3];
+                  let toolStr = `${toolName} ${toolInput}`;
+                  try { toolStr = this.formatToolCall(toolStr); } catch(e) {}
+                  turn.liveContainer.push({ think: think || null, tools: [toolStr] });
+                  lastIndex = regex.lastIndex;
+              }
+              const remainder = content.substring(lastIndex).trim();
+              if (remainder) turn.agent = remainder;
+          } else {
+              turn.agent = content;
+          }
+          turn.completed = true;
+        } else {
+          let think = null;
+          let tools = [];
+          parts.forEach(p => {
+            if (p.type === 'text') {
+              let textContent = p.content;
+              const thinkMatch = /<think>([\s\S]*?)<\/think>/.exec(textContent);
+              if (thinkMatch) {
+                  textContent = thinkMatch[1].trim();
+              }
+              if (!textContent.includes('[Thought process omitted for context limits]')) {
+                  think = (think || '') + textContent;
+              }
+            } else if (p.type === 'tool_use') {
+              try {
+                  tools.push(this.formatToolCall(`${p.tool_name} ${p.arguments}`));
+              } catch(e) {
+                  tools.push(`${p.tool_name} ${p.arguments}`);
+              }
+            }
+          });
+          turn.liveContainer.push({ think, tools });
+        }
+        
+        if (msg.run_meta && msg.run_meta.duration_ms) {
+          turn.completed = true;
+          turn.durationMs = msg.run_meta.duration_ms;
+        }
+        if (msg.run_meta && msg.run_meta.workspace_changes) {
+          turn.workspaceChanges = msg.run_meta.workspace_changes;
         }
       }
-    }
+    });
+    this.render();
   }
 
-  if (!skipAppend && finalRawText && (!isNoisyLiveText(finalRawText) || isStructuredLive) && opts.log !== false) {
-    const entry = document.createElement('div');
-    entry.className = 'live-entry markdown-body';
-    if (liveKind === 'action') entry.classList.add('action-entry');
-    if (liveKind === 'think') {
-      entry.textContent = finalRawText;
-      entry.style.cssText = 'white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;';
-    } else {
-      try {
-        entry.innerHTML = DOMPurify.sanitize(marked.parse(finalRawText));
-      } catch (e) {
-        entry.textContent = finalRawText;
+  addLiveEvent(evt) {
+    const turn = this._currentTurn();
+    const kind = evt.type || evt.kind || 'activity';
+    const rawText = String(evt.text || evt.event || evt.message || evt.error || '').trim();
+    if (!rawText) return;
+
+    if (kind === 'think') {
+      if (rawText.includes('[Thought process omitted for context limits]')) return;
+      if (turn.liveContainer.length === 0 || turn.liveContainer[turn.liveContainer.length - 1].tools.length > 0) {
+        turn.liveContainer.push({ think: rawText, tools: [] });
+      } else {
+        const lastBlock = turn.liveContainer[turn.liveContainer.length - 1];
+        if (lastBlock.think === 'Thinking...') {
+          lastBlock.think = rawText;
+        } else {
+          lastBlock.think = (lastBlock.think || '') + rawText;
+        }
       }
+    } else if (kind === 'action') {
+      if (rawText.startsWith('Executing: ')) {
+        let tool = rawText.replace(/^Executing:\s*/, '');
+        tool = this.formatToolCall(tool);
+        if (turn.liveContainer.length === 0) {
+          turn.liveContainer.push({ think: null, tools: [] });
+        }
+        turn.liveContainer[turn.liveContainer.length - 1].tools.push(tool);
+      } else return;
+    } else if (kind === 'activity') {
+      if (rawText === 'Compacting memory...') {
+        if (turn.liveContainer.length === 0) {
+          turn.liveContainer.push({ think: null, tools: [] });
+        }
+        turn.liveContainer[turn.liveContainer.length - 1].tools.push('compacting...');
+      } else if (rawText.toLowerCase().includes('error')) {
+         turn.liveContainer.push({ think: '❌ ' + rawText, tools: [] });
+      } else return;
+    } else if (kind === 'token') {
+      turn.agent = (turn.agent || '') + rawText;
+      turn.completed = true;
+    } else if (kind === 'done' || kind === 'complete') {
+      turn.completed = true;
+      if (evt.duration_ms) turn.durationMs = evt.duration_ms;
+    }
+
+    requestAnimationFrame(() => {
+      this.render();
+    });
+  }
+
+  formatRunDuration(ms) {
+    const seconds = Math.max(1, Math.round(ms / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  }
+
+  render() {
+    const shouldFollow = chatIsNearBottom();
+    const chat = document.getElementById('chat');
+
+    if (this.turns.length === 0) {
+        chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
+        if (shouldFollow) scrollChatToBottom();
+        return;
+    }
+
+    if (chat.children.length === 1 && chat.children[0].classList.contains('system')) {
+        chat.innerHTML = '';
+    }
+
+    while (chat.children.length > this.turns.length) {
+        chat.removeChild(chat.lastChild);
+    }
+
+    for (let i = 0; i < this.turns.length; i++) {
+        const turn = this.turns[i];
+        let turnGroup = chat.children[i];
+        const isLast = (i === this.turns.length - 1);
+        
+        if (!turnGroup) {
+            turnGroup = document.createElement('div');
+            turnGroup.className = 'chat-turn';
+            chat.appendChild(turnGroup);
+        } else {
+            // Skip re-rendering fully completed historical turns to preserve DOM state
+            if (!isLast && turnGroup.dataset.renderedFinal === "true") {
+                continue;
+            }
+        }
+        
+        this._renderTurn(turnGroup, turn);
+        
+        // Mark as final if it's a completed historical turn
+        if (!isLast && turn.completed) {
+            turnGroup.dataset.renderedFinal = "true";
+        }
     }
     
-    if (isStructuredLive) {
-      if (inlineLiveLog) {
-        if (liveKind === 'think') {
-          inlineLiveLog.innerHTML = '';
-          inlineLiveLog.scrollTop = 0;
-        }
-        inlineLiveLog.appendChild(entry);
-        // Auto-scroll to bottom for actions so latest is visible (thought stays sticky at top via CSS)
-        if (liveKind !== 'think' && inlineLiveLog.scrollHeight - inlineLiveLog.clientHeight <= inlineLiveLog.scrollTop + 100) {
-          inlineLiveLog.scrollTop = inlineLiveLog.scrollHeight;
-        }
-      }
-    } else if (isToolResult) {
-      // Do nothing - user explicitly requested to hide massive tool results from the UI to reduce clutter
-    } else if (inlineLiveLog) {
-      // Activity log entries: scroll to bottom if user was near bottom
-      if (inlineLiveLog.scrollHeight - inlineLiveLog.clientHeight <= inlineLiveLog.scrollTop + 50) {
-        inlineLiveLog.scrollTop = inlineLiveLog.scrollHeight;
-      }
-    }
+    updateStickyPrompts();
+    if (shouldFollow) scrollChatToBottom();
   }
-  if (shouldFollow) scrollChatToBottom();
+
+  _renderTurn(turnGroup, turn) {
+      if (turn.system) {
+          let sysD = turnGroup.querySelector('.msg.agent');
+          if (!sysD) {
+              sysD = document.createElement('div');
+              sysD.className = 'msg agent';
+              sysD.innerHTML = `<div class="label">System</div><div class="bubble">${esc(turn.system)}</div>`;
+              turnGroup.appendChild(sysD);
+          }
+          return;
+      }
+
+      // 1. User Message
+      if (turn.user) {
+        let d = turnGroup.querySelector('.msg.user');
+        if (!d) {
+            d = document.createElement('div');
+            d.className = 'msg user';
+            
+            let content = esc(turn.user);
+            content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
+            content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
+              return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
+            });
+            d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
+            
+            if (turn.snapshot && turn.messageId) {
+                const btn = document.createElement('button');
+                btn.className = 'revert-btn';
+                btn.title = 'Revert workspace to this point';
+                btn.textContent = '\u21B6';
+                btn.dataset.messageId = turn.messageId;
+                btn.onclick = async () => {
+                  const r = await fetch('/api/chat/revert', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message_id: turn.messageId})
+                  });
+                  if (r.ok) {
+                    const data = await r.json();
+                    this.loadDb(data.session_log || []);
+                    refresh(); 
+                  }
+                };
+                d.querySelector('.label').after(btn);
+            }
+            turnGroup.appendChild(d);
+            lastUserMsg = d; // update global pointer
+        }
+      }
+
+      // 2. Live Logs (Background activity)
+      if (turn.liveContainer.length > 0) {
+        let wrapper = turnGroup.querySelector('.live-container');
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'live-container';
+            wrapper.style.display = 'flex';
+            wrapper.style.flexDirection = 'column';
+            wrapper.style.gap = '6px';
+            wrapper.style.marginBottom = '10px';
+            wrapper.style.marginTop = '2px';
+
+            const details = document.createElement('details');
+            details.className = 'inline-live';
+            
+            const sharedLogHtml = `<div class="compact-log live-log" style="margin-top:8px; padding-left:16px; display:flex; flex-direction:column; gap:4px; max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: #3f424b transparent;"></div>`;
+            
+            if (turn.completed) {
+                details.classList.add('live-compact');
+                details.open = false;
+                const durationTxt = this.formatRunDuration(turn.durationMs || 0);
+                details.innerHTML = `<summary><span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span></summary>` + sharedLogHtml;
+            } else {
+                details.classList.add('flat-live');
+                details.open = true;
+                details.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;">Running background tasks...</span><span class="timer" style="margin-left:8px; opacity:0.6; font-variant-numeric: tabular-nums;"></span></summary>` + sharedLogHtml;
+            }
+            
+            details.dataset.completedState = turn.completed ? "true" : "false";
+            wrapper.appendChild(details);
+            
+            const agentNode = turnGroup.querySelector('.msg.agent');
+            if (agentNode) {
+                turnGroup.insertBefore(wrapper, agentNode);
+            } else {
+                turnGroup.appendChild(wrapper);
+            }
+        } else {
+            const details = wrapper.querySelector('details.inline-live');
+            const isCompleted = turn.completed;
+            const currentCompletedState = details.dataset.completedState === "true";
+            
+            if (isCompleted && !currentCompletedState) {
+                details.classList.remove('flat-live');
+                details.classList.add('live-compact');
+                details.open = false;
+                const durationTxt = this.formatRunDuration(turn.durationMs || 0);
+                const summary = details.querySelector('summary');
+                if (summary) {
+                    summary.innerHTML = `<span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span>`;
+                }
+                details.dataset.completedState = "true";
+            }
+        }
+
+        const details = wrapper.querySelector('details.inline-live');
+        const log = details.querySelector('.compact-log');
+        const renderedCount = parseInt(log.dataset.count || "0", 10);
+        const isScrolledToBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 10;
+        
+        if (turn.liveContainer.length > renderedCount) {
+            for (let i = renderedCount; i < turn.liveContainer.length; i++) {
+                const block = turn.liveContainer[i];
+                if (block.think) {
+                    const entry = document.createElement('div');
+                    entry.className = 'live-entry markdown-body';
+                    entry.dataset.thinkIdx = i;
+                    entry.dataset.len = block.think.length;
+                    entry.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+                    log.appendChild(entry);
+                }
+                if (block.tools) {
+                    block.tools.forEach(t => {
+                        const entry = document.createElement('div');
+                        entry.className = 'live-entry markdown-body action-entry';
+                        entry.style.animation = 'none';
+                        if (t === 'compacting...') {
+                            entry.innerHTML = `<p>⚙️ compacting...</p>`;
+                        } else {
+                            entry.innerHTML = `<p>⚙️ ${esc(t)}</p>`;
+                        }
+                        log.appendChild(entry);
+                    });
+                }
+            }
+            log.dataset.count = turn.liveContainer.length;
+        }
+        for (let i = 0; i < Math.min(turn.liveContainer.length, renderedCount); i++) {
+            const block = turn.liveContainer[i];
+            if (block.think) {
+                const thinkNode = log.querySelector(`[data-think-idx="${i}"]`);
+                if (thinkNode) {
+                    const currentLen = parseInt(thinkNode.dataset.len || "0", 10);
+                    if (block.think.length > currentLen) {
+                        thinkNode.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+                        thinkNode.dataset.len = block.think.length;
+                    }
+                }
+            }
+            if (!block.tools) continue;
+            const toolKey = 't_' + i;
+            const renderedTools = parseInt(log.dataset[toolKey] || "0", 10);
+            if (block.tools.length > renderedTools) {
+                for (let j = renderedTools; j < block.tools.length; j++) {
+                    const entry = document.createElement('div');
+                    entry.className = 'live-entry markdown-body action-entry';
+                    entry.style.animation = 'none';
+                    entry.innerHTML = `<p>⚙️ ${esc(block.tools[j])}</p>`;
+                    log.appendChild(entry);
+                }
+                log.dataset[toolKey] = block.tools.length;
+            }
+        }
+        if (isScrolledToBottom) {
+            log.scrollTop = log.scrollHeight;
+        }
+      }
+
+      // 3. Agent Message
+      if (turn.agent) {
+        let d = turnGroup.querySelector('.msg.agent');
+        if (!d) {
+            d = document.createElement('div');
+            d.className = 'msg agent';
+            d.innerHTML = `<div class="label">Agent</div><div class="bubble markdown-body"></div>`;
+            turnGroup.appendChild(d);
+        }
+        
+        let content = turn.agent;
+        
+        // Parse <think> tags from DeepSeek R1 (hide completely in final response per user request)
+        content = content.replace(/<think>([\s\S]*?)<\/think>/g, '');
+        
+        if (window.marked) {
+            content = md(content);
+        } else {
+            content = esc(content);
+        }
+        
+        const bubble = d.querySelector('.bubble');
+        if (bubble) {
+            bubble.innerHTML = content;
+        }
+        
+        // Render any UI widgets for changed files
+        if (turn.workspaceChanges) {
+           let changedFiles = [];
+           if (turn.workspaceChanges.created) changedFiles.push(...turn.workspaceChanges.created);
+           if (turn.workspaceChanges.modified) changedFiles.push(...turn.workspaceChanges.modified);
+           if (changedFiles.length > 0 && window.latestArtifacts) {
+              if (!d.dataset.renderedDiffs) {
+                  let relevantDiffs = matchingDiffArtifactsForChangedFiles(changedFiles);
+                  if (relevantDiffs.length > 0) {
+                      renderDiffReviewWidget(d, relevantDiffs);
+                      d.dataset.renderedDiffs = "true";
+                  }
+               }
+            }
+         }
+      }
+    _updateTokenDisplay();
+  }
+
+   updateTimer() {
+    if (!running) return;
+    const s = Math.floor((Date.now() - runStartTime) / 1000);
+    const nodes = document.querySelectorAll('.inline-live .timer');
+    nodes.forEach(tEl => {
+      tEl.textContent = `[${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}]`;
+    });
+  }
 }
+
+const conversationState = new ConversationState();
+
+// Wrappers for old API
+function addMsg(role, txt, opts) {
+    if (role.toLowerCase() === 'system') conversationState.addSystemMsg(txt);
+    else if (role.toLowerCase() === 'user') {
+        if (conversationState.turns.length > 0) {
+            conversationState.turns[conversationState.turns.length - 1].completed = true;
+        }
+        conversationState.turns.push({ user: txt, agent: null, liveContainer: [], completed: false, durationMs: 0 });
+        conversationState.render();
+    }
+    else if (role.toLowerCase() === 'agent') {
+        const turn = conversationState._currentTurn();
+        turn.agent = txt;
+        conversationState.render();
+    }
+}
+function updateInlineLive(text, state, opts) {
+    conversationState.addLiveEvent({ type: 'think', text: text });
+}
+function compactLiveTranscript(durationMs) {
+    const turn = conversationState._currentTurn();
+    turn.durationMs = durationMs;
+    turn.completed = true;
+    conversationState.render();
+}
+function updateTimer() {
+    conversationState.updateTimer();
+}
+function renderSession(log) {
+    conversationState.loadDb(log || []);
+}
+
 
 function updateSendStopButtons() {
   const editorHasText = textOfEditor().trim() !== '';
@@ -889,12 +847,6 @@ function setRunningState(isRunning, isStopping = false) {
     const elapsedMs = runStartTime ? Date.now() - runStartTime : 0;
     clearInterval(runTimerInterval);
     runTimerInterval = null;
-    if (inlineLiveEl) {
-      inlineLiveEl.open = false;
-      inlineLiveEl.classList.remove('running');
-      const tEl = inlineLiveEl.querySelector('.timer');
-      if (tEl) tEl.textContent = '';
-    }
     compactLiveTranscript(elapsedMs);
     runStartTime = 0;
   }
@@ -1058,27 +1010,6 @@ function renderBackendDiagnostics(diag) {
   if ($('diagReason')) $('diagReason').textContent = diag.reason || 'No backend diagnostic reason available.';
 }
 
-function renderModelTestResult(d) {
-  if (!$('diagResults')) return;
-  $('diagResults').innerHTML = '';
-  const c = document.createElement('div');
-  c.className = 'diag-check' + (d.ok ? ' ok' : ' bad');
-  c.innerHTML = `<span>${d.ok?'OK':'ERR'}</span><div><strong>model connection (${esc(d.provider)})</strong><small>${esc(d.detail||'')}</small></div>`;
-  $('diagResults').appendChild(c);
-  const r = document.createElement('div');
-  r.className = 'diag-elapsed';
-  r.textContent = `Elapsed: ${d.elapsed_seconds}s`;
-  $('diagResults').appendChild(r);
-  if (d.response_preview && !d.ok) {
-    const p = document.createElement('pre');
-    p.textContent = d.response_preview;
-    p.style.marginTop = '0.5rem';
-    p.style.fontSize = '0.8rem';
-    p.style.whiteSpace = 'pre-wrap';
-    $('diagResults').appendChild(p)
-  }
-}
-
 async function openFile(path) {
   try {
     await fetch('/api/open-file', {
@@ -1111,6 +1042,7 @@ async function refresh() {
     const a = await r.json();
     window.SERVER_FEATURES = a.features || {};
     projectSelected = !!a.workspace;
+    window.currentConversationId = a.active_conversation_id;
     $('workTitle').textContent = projectSelected ? ((a.project && a.project.workspace) ? a.project.workspace.split(/[\\/]/).pop() : 'Workspace') : 'Select a project';
     $('workSub').textContent = projectSelected ? (a.workspace || '') : 'No workspace active.';
     _updateTokenDisplay();
@@ -1161,11 +1093,11 @@ async function refresh() {
           const events = act.events || a.live_events || [];
           if (events.length > 0) {
             events.forEach(evt => {
-              const rawText = typeof evt === 'string' ? evt : (evt.text || evt.event || evt.message || evt.error);
-              const kind = (typeof evt === 'string' ? 'activity' : evt.type) || 'activity';
-              if (!rawText) return;
-              if (kind === 'done' || kind === 'think' || (!['think', 'action'].includes(kind) && isNoisyLiveText(rawText))) return;
-              updateInlineLive(rawText, 'running', { log: true, countRepeats: false, kind: (kind !== 'think' && kind !== 'action') ? 'action' : kind });
+              if (typeof evt === 'string') {
+                handleAgentEvent({ type: 'activity', event: evt }, true);
+              } else {
+                handleAgentEvent(evt, true);
+              }
             });
           }
         } catch (e) {
@@ -1192,6 +1124,13 @@ async function refresh() {
       }
     }
     if (a.running && !sseSource) {
+      try {
+        sseSource = new EventSource('/api/stream/activity');
+        sseSource.onmessage = sseOnMessage;
+        sseSource.onerror = sseOnError;
+      } catch (ex) {
+        console.log('SSE not available, falling back to polling');
+      }
       updateInlineLive(a.activity || 'Thinking', a.stop_requested ? 'stopping' : 'running', {
         log: false
       })
@@ -1295,6 +1234,128 @@ async function uploadFiles(files) {
   });
   setEditorText(t + ' ')
 }
+  // Enhancement: SSE streaming for live activity updates  
+function handleAgentEvent(d, isHistory = false) {
+  if (d.conversation_id && window.currentConversationId && d.conversation_id !== window.currentConversationId) {
+    return; // Filter out live events belonging to a different background session
+  }
+  if (isHistory && (d.type === 'think' || d.type === 'action' || d.type === 'token' || d.type === 'response')) {
+    return;
+  }
+  
+  if (d.type === 'token_usage') {
+    totalTokens.prompt = d.total_prompt || 0;
+    totalTokens.completion = d.total_completion || 0;
+    return;
+  }
+  if (d.type === 'primary_changed') {
+    if (!isHistory) refresh();
+    return;
+  }
+  
+  if (d.type === 'error') {
+    const errMsg = d.error || d.message || 'An error occurred';
+    if (!isHistory) conversationState.addSystemMsg('⚠️ ' + errMsg);
+    if (sseSource) { sseSource.close(); sseSource = null; }
+    clearInterval(poll); poll = null;
+    setRunningState(false, false);
+    if (!isHistory) {
+       const t = conversationState._currentTurn();
+       t.completed = true;
+       conversationState.render();
+    }
+    firstStatus = true;
+    if (!isHistory) refresh();
+    return;
+  }
+  
+  if (d.type === 'complete') {
+     _notifQueued = true;
+     if (!isHistory) _playNotificationSound();
+     
+     if (d.response) {
+         conversationState.addLiveEvent({ type: 'token', text: d.response });
+     }
+     conversationState.addLiveEvent({ type: 'done' });
+     
+     if (sseSource) {
+       sseSource.close();
+       sseSource = null;
+     }
+     clearInterval(poll);
+     poll = null;
+     setRunningState(false, false);
+     firstStatus = true;
+     if (!isHistory) refresh();
+     return;
+  }
+  
+  if (d.type === 'prompt') {
+    if (!isHistory) {
+      $('promptToolName').innerText = d.tool || 'unknown';
+      let cmdDisplay = d.command || '';
+      if (typeof cmdDisplay === 'object') {
+        cmdDisplay = JSON.stringify(cmdDisplay, null, 2);
+      }
+      $('promptToolCommand').innerText = cmdDisplay;
+      $('toolPromptModal').classList.add('open');
+      
+      const handleDecision = async (approve) => {
+        $('toolPromptModal').classList.remove('open');
+        $('promptApproveBtn').onclick = null;
+        $('promptRejectBtn').onclick = null;
+        try {
+          await fetch('/api/tool/approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ call_id: d.call_id, approve })
+          });
+        } catch (e) { console.error('Failed to send tool approval', e); }
+      };
+      
+      $('promptApproveBtn').onclick = () => handleDecision(true);
+      $('promptRejectBtn').onclick = () => handleDecision(false);
+    }
+    return;
+  }
+  
+  // Default pass-through to new state manager
+  conversationState.addLiveEvent(d);
+}
+function sseOnMessage(e) {
+  try {
+    const d = JSON.parse(e.data);
+    handleAgentEvent(d, false);
+  } catch (ex) {}
+}
+
+function sseOnError() {
+  if (sseSource) {
+    sseSource.close();
+    sseSource = null
+  }
+  // High fix #5: start polling fallback immediately so live activity doesn't freeze
+  if (!poll) poll = setInterval(refresh, 900);
+  // Attempt SSE reconnect after 2s (only while agent is still running)
+  setTimeout(() => {
+    if (running && !sseSource) {
+      try {
+        sseSource = new EventSource('/api/stream/activity');
+        sseSource.onmessage = sseOnMessage;
+        sseSource.onerror = sseOnError;
+        sseSource.onopen = function () {
+          if (poll) {
+            clearInterval(poll);
+            poll = null;
+          }
+          refresh();
+        };
+      } catch (ex) {
+        /* stay on poll fallback */ }
+    }
+  }, 2000);
+}
+
 let isSending = false;
 async function send() {
   if (isSending) return;
@@ -1336,148 +1397,7 @@ async function send() {
   updateInlineLive('Thinking...', 'running');
   setRunningState(true, false);
   setEditorText('');
-  // Enhancement: SSE streaming for live activity updates
-  let streamingBubble = null;
 
-  function sseOnMessage(e) {
-    try {
-      const d = JSON.parse(e.data);
-      if (['think', 'action', 'response'].includes(d.type)) {
-        updateInlineLive(d.event || d.message || 'Working', 'running', {
-          log: true,
-          countRepeats: false,
-          kind: d.type
-        });
-      } else if (d.type === 'activity') {
-        updateInlineLive(d.event || 'Working', 'running', {
-          log: true,
-          countRepeats: false
-        });
-      } else if (d.type === 'token_usage') {
-        totalTokens.prompt = d.total_prompt || totalTokens.prompt;
-        totalTokens.completion = d.total_completion || totalTokens.completion;
-        _updateTokenDisplay();
-      } else if (d.type === 'token') {
-        if (inlineLiveEl && inlineLiveEl.open) {
-          inlineLiveEl.open = false;
-          inlineLiveEl.classList.remove('running');
-          inlineLiveEl.querySelector('.livetext').textContent = 'Completed';
-        }
-        if (!streamingBubble) {
-          const el = document.createElement('div');
-          el.className = 'msg agent';
-          el.innerHTML = '<div class="label">Agent</div><div class="bubble markdown-body" id="streamingMsg"></div>';
-          $('chat').appendChild(el);
-          streamingBubble = el.querySelector('.bubble');
-        }
-        const shouldFollow = chatIsNearBottom();
-        streamingBubble.dataset.raw = (streamingBubble.dataset.raw || '') + d.event;
-        if (!streamingBubble.renderQueued) {
-          streamingBubble.renderQueued = true;
-          requestAnimationFrame(() => {
-            if (streamingBubble) {
-              streamingBubble.innerHTML = md(streamingBubble.dataset.raw);
-              if (shouldFollow) scrollChatToBottom();
-              streamingBubble.renderQueued = false;
-            }
-          });
-        }
-      } else if (d.type === 'error') {
-        const errMsg = d.error || d.message || 'An error occurred';
-        addMsg('System', '⚠️ ' + errMsg);
-        if (sseSource) { sseSource.close(); sseSource = null; }
-        clearInterval(poll); poll = null;
-        setRunningState(false, false);
-        compactLiveTranscript();
-        firstStatus = true;
-        return;
-      } else if (d.type === 'complete') {
-        _notifQueued = true;
-        _playNotificationSound();
-        if (d.response) {
-          const sm = document.getElementById('streamingMsg');
-          if (sm) {
-            sm.innerHTML = md(d.response);
-            sm.removeAttribute('id');
-          } else {
-            addMsg('Agent', d.response);
-          }
-          streamingBubble = null;
-        }
-        if (sseSource) {
-          sseSource.close();
-          sseSource = null
-        }
-        clearInterval(poll);
-        poll = null;
-        setRunningState(false, false);
-        firstStatus = true;
-        refresh().then(() => {
-          if (d.workspace_changes) {
-            let changedFiles = [];
-            if (d.workspace_changes.created) changedFiles.push(...d.workspace_changes.created);
-            if (d.workspace_changes.modified) changedFiles.push(...d.workspace_changes.modified);
-            if (changedFiles.length > 0) {
-              let relevantDiffs = matchingDiffArtifactsForChangedFiles(changedFiles);
-              if (relevantDiffs.length > 0) {
-                const msgs = document.querySelectorAll('#chat .msg.agent');
-                if (msgs.length > 0) {
-                  const lastMsgEl = msgs[msgs.length - 1];
-                  let oldWidget = lastMsgEl.querySelector('.diff-widget');
-                  if (oldWidget) oldWidget.remove();
-                  renderDiffReviewWidget(lastMsgEl, relevantDiffs);
-                }
-              }
-            }
-          }
-        });
-      } else if (d.type === 'status') {
-        if (d.stopping) updateInlineLive('Stopping...', 'stopping', {
-          log: false
-        });
-        else if (d.running) updateInlineLive(d.activity || 'Thinking', 'running', {
-          log: false
-        });
-      } else if (d.type === 'done') {
-        if (sseSource) {
-          sseSource.close();
-          sseSource = null
-        }
-        if (streamingBubble) {
-          setTimeout(() => streamingBubble.removeAttribute('id'), 1000);
-          streamingBubble = null;
-        }
-        refresh();
-      }
-    } catch (ex) {}
-  }
-
-  function sseOnError() {
-    if (sseSource) {
-      sseSource.close();
-      sseSource = null
-    }
-    // High fix #5: start polling fallback immediately so live activity doesn't freeze
-    if (!poll) poll = setInterval(refresh, 900);
-    // Attempt SSE reconnect after 2s (only while agent is still running)
-    setTimeout(() => {
-      if (running && !sseSource) {
-        try {
-          sseSource = new EventSource('/api/stream/activity');
-          sseSource.onmessage = sseOnMessage;
-          sseSource.onerror = sseOnError;
-          sseSource.onopen = function () {
-            if (poll) {
-              clearInterval(poll);
-              poll = null;
-            }
-            refresh();
-          };
-        } catch (ex) {
-          /* stay on poll fallback */ }
-      }
-    }, 2000);
-  }
   try {
     sseSource = new EventSource('/api/stream/activity');
     sseSource.onmessage = sseOnMessage;
@@ -1538,10 +1458,6 @@ async function send() {
       compactLiveTranscript();
     }
     // Success path: SSE 'complete' handler handles cleanup.
-    // Always clear transient state.
-    const sm = document.getElementById('streamingMsg');
-    if (sm) sm.removeAttribute('id');
-    inlineLiveEl = null;
     isSending = false;
     await refresh();
   }
@@ -1675,10 +1591,18 @@ async function openSettings() {
     const r = await fetch('/api/config/llm');
     const c = await r.json();
     if (c) {
-      $('cfgModel').value = c.model || '';
-      $('cfgBaseUrl').value = c.base_url || '';
-      $('cfgApiKey').value = c.api_key || '';
-      $('cfgMaxMessages').value = c.max_messages || 60;
+      const pc = $('providersContainer');
+      pc.innerHTML = '';
+      if (c.providers && c.providers.length > 0) {
+        c.providers.forEach((p, idx) => addProviderUI(p, idx === 0));
+      } else {
+        addProviderUI({base_url: '', api_key: ''}, true);
+      }
+      if (c.shell_access === 'ask') {
+        $('cfgShellAccess').value = 'ask';
+      } else {
+        $('cfgShellAccess').value = 'allow';
+      }
 
       uiRunTimeoutSeconds = parseFloat(c.ui_run_timeout || c.request_timeout || 3600) || 3600;
     }
@@ -1687,17 +1611,134 @@ async function openSettings() {
   }
   $('settingsModal').classList.add('open')
 }
+function addProviderUI(p, isPrimary) {
+  const pc = $('providersContainer');
+  const div = document.createElement('div');
+  div.className = 'provider-item config-group';
+  div.dataset.id = p.id || '';
+  div.style.border = '1px solid #30363d';
+  div.style.padding = '10px';
+  div.style.marginBottom = '10px';
+  div.style.borderRadius = '6px';
+  div.style.position = 'relative';
+
+  const title = isPrimary ? 'Primary Provider' : 'Fallback Provider';
+  const removeBtn = isPrimary ? '' : `<button type="button" class="remove-prov" title="Remove" style="position:absolute; right:10px; top:8px; background:none; border:none; color:#f85149; cursor:pointer; font-size:16px;">×</button>`;
+  const makePrimaryBtn = isPrimary ? '' : `<button type="button" class="make-primary-prov" style="position:absolute; right:40px; top:12px; background:none; border:none; color:var(--text-color); cursor:pointer; font-size:11px; text-decoration:underline;">Make Primary</button>`;
+
+  div.innerHTML = `
+    <div style="font-weight: 600; margin-bottom: 8px; font-size: 12px; color: #8b949e;">${title}</div>
+    
+    <label class="config-label" style="margin-top: 8px;">Model Name (e.g. gpt-4o)</label>
+    <input type="text" class="config-input cfg-model" value="${esc(p.model || '')}">
+    
+    <label class="config-label" style="margin-top: 8px;">Base URL</label>
+    <input type="text" class="config-input cfg-base-url" value="${esc(p.base_url || '')}" placeholder="https://api.openai.com/v1">
+    
+    <label class="config-label" style="margin-top: 8px;">API Key</label>
+    <input type="password" class="config-input cfg-api-key" value="${esc(p.api_key || '')}" placeholder="sk-...">
+    
+    <div style="display:flex; gap:10px; margin-top: 8px;">
+      <div style="flex:1;">
+        <label class="config-label">Context Window</label>
+        <input type="number" class="config-input cfg-context-window" value="${p.context_window || 0}" placeholder="0 (Auto)">
+      </div>
+      <div style="flex:1;">
+        <label class="config-label">Max Messages</label>
+        <input type="number" class="config-input cfg-max-messages" value="${p.max_messages || 0}" placeholder="0 (Auto)">
+      </div>
+    </div>
+    
+    <label class="config-label" style="margin-top: 8px; display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" class="cfg-disable-vision" ${p.disable_vision ? 'checked' : ''}> Disable Vision (Strip Images)
+    </label>
+    
+    <div style="margin-top: 8px; display: flex; align-items: center; gap: 8px;">
+      <button type="button" class="diag-button prov-test-btn" data-provider-id="${esc(p.id || '')}">Test Connection</button>
+      <span class="prov-test-result" style="font-size: 12px; color: var(--text-muted);"></span>
+    </div>
+    
+    ${makePrimaryBtn}
+    ${removeBtn}
+  `;
+  if (!isPrimary) {
+    div.querySelector('.remove-prov').onclick = () => div.remove();
+    div.querySelector('.make-primary-prov').onclick = () => {
+      const pcContainer = $('providersContainer');
+      const allDivs = Array.from(pcContainer.querySelectorAll('.provider-item'));
+      const oldIndex = allDivs.indexOf(div);
+      
+      const pList = allDivs.map((el) => {
+        return {
+          id: el.dataset.id,
+          model: el.querySelector('.cfg-model').value,
+          base_url: el.querySelector('.cfg-base-url').value,
+          api_key: el.querySelector('.cfg-api-key').value,
+          disable_vision: el.querySelector('.cfg-disable-vision').checked,
+          context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
+          max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0
+        };
+      });
+
+      const item = pList.splice(oldIndex, 1)[0];
+      pList.unshift(item);
+
+      pcContainer.innerHTML = '';
+      pList.forEach((p, idx) => addProviderUI(p, idx === 0));
+      
+      // Automatically save settings so the new primary takes effect immediately
+      $('settingsSave').click();
+    };
+  }
+  div.querySelector('.prov-test-btn').onclick = async function () {
+    const btn = this;
+    const resultEl = div.querySelector('.prov-test-result');
+    const providerId = btn.dataset.providerId;
+    if (!providerId) { resultEl.textContent = 'No provider ID'; return; }
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+    resultEl.textContent = 'Connecting...';
+    resultEl.style.color = 'var(--text-muted)';
+    try {
+      const r = await fetch('/api/diagnostics/model-test?provider=' + encodeURIComponent(providerId), { method: 'POST' });
+      const d = await readJsonOrText(r);
+      if (d.ok) {
+        resultEl.innerHTML = '✅ OK <small>(' + esc(d.detail || '') + ')</small>';
+        resultEl.style.color = 'var(--success)';
+      } else {
+        resultEl.innerHTML = '❌ ERR <small>' + esc(d.detail || '') + '</small>';
+        resultEl.style.color = 'var(--danger)';
+      }
+    } catch (e) {
+      resultEl.textContent = 'Error: ' + e.message;
+      resultEl.style.color = 'var(--danger)';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Test Connection';
+    }
+  };
+  pc.appendChild(div);
+}
+
+$('addProviderBtn').onclick = () => addProviderUI({base_url: '', api_key: ''}, false);
+
 $('settingsBtn').onclick = openSettings;
 $('settingsClose').onclick = () => $('settingsModal').classList.remove('open');
 $('settingsSave').onclick = async () => {
+  const pList = Array.from(document.querySelectorAll('.provider-item')).map((el, idx) => {
+    return {
+      id: el.dataset.id || '',
+      model: el.querySelector('.cfg-model').value,
+      base_url: el.querySelector('.cfg-base-url').value,
+      api_key: el.querySelector('.cfg-api-key').value,
+      disable_vision: el.querySelector('.cfg-disable-vision').checked,
+      context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
+      max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0
+    };
+  });
   const p = {
-    provider: 'openai_compatible',
-    model: $('cfgModel').value,
-    base_url: $('cfgBaseUrl').value,
-    api_key: $('cfgApiKey').value,
-    max_messages: parseInt($('cfgMaxMessages').value) || 60,
-
-    agent_backend: 'openai_tools'
+    providers: pList,
+    shell_access: $('cfgShellAccess').value,
   };
   try {
     await fetch('/api/config/llm', {
@@ -1707,30 +1748,166 @@ $('settingsSave').onclick = async () => {
       },
       body: JSON.stringify(p)
     })
+    if (pList.length > 0) updateModelTag(pList[0].model);
   } catch (e) {
     console.error('Failed to save llm config', e)
   }
   $('settingsModal').classList.remove('open')
 };
-if ($('diagModelTest')) $('diagModelTest').onclick = async () => {
-  const btn = $('diagModelTest');
-  btn.disabled = true;
-  btn.textContent = 'Testing...';
-  if ($('diagResults')) $('diagResults').innerHTML = '<div class="diag-elapsed">Testing model connection...</div>';
+async function openMcpSettings() {
+  $('settingsModal').classList.remove('open');
   try {
-    const r = await fetch('/api/diagnostics/model-test', {
-      method: 'POST'
-    });
-    const d = await readJsonOrText(r);
-    renderModelTestResult(d)
+    const r = await fetch('/api/config/mcp');
+    const c = await r.json();
+    const mc = $('mcpContainer');
+    mc.innerHTML = '';
+    if (c && c.servers && Object.keys(c.servers).length > 0) {
+      for (const [id, srv] of Object.entries(c.servers)) {
+        addMcpUI(id, srv);
+      }
+    } else {
+      addMcpUI('my-mcp', {command: ['npx', '-y', '@modelcontextprotocol/server-postgres'], environment: {}});
+    }
   } catch (e) {
-    if ($('diagResults')) $('diagResults').innerHTML = `<div class="diag-check bad"><span>NO</span><div><strong>model connection</strong><small>${esc(e.message)}</small></div></div>`
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Test Model Connection';
-    await refresh()
+    console.error('Failed to load mcp config', e);
   }
+  $('mcpModal').classList.add('open');
+}
+
+function addMcpUI(id, srv) {
+  const mc = $('mcpContainer');
+  const div = document.createElement('div');
+  div.className = 'mcp-item config-group';
+  div.style.border = '1px solid #30363d';
+  div.style.padding = '10px';
+  div.style.marginBottom = '10px';
+  div.style.borderRadius = '6px';
+  div.style.position = 'relative';
+
+  let cmdStr = '';
+  if (srv.command) {
+    cmdStr = srv.command.join(' ');
+  }
+  let envStr = '';
+  if (srv.environment) {
+    envStr = Object.entries(srv.environment).map(([k, v]) => `${k}=${v}`).join('\n');
+  }
+
+  div.innerHTML = `
+    <button type="button" class="remove-mcp" style="position:absolute; right:10px; top:10px; background:none; border:none; color:#f85149; cursor:pointer;">×</button>
+    <label class="config-label">Server ID</label>
+    <input type="text" class="config-input mcp-id" value="${esc(id)}">
+    
+    <label class="config-label" style="margin-top: 8px;">Command</label>
+    <input type="text" class="config-input mcp-cmd" value="${esc(cmdStr)}" placeholder="e.g. npx -y @modelcontextprotocol/server-github">
+    
+    <label class="config-label" style="margin-top: 8px;">Environment Variables</label>
+    <textarea class="config-input mcp-env" style="min-height: 60px; font-family: monospace; font-size: 11px;" placeholder="GITHUB_TOKEN=abc...
+DATABASE_URL=postgres://...">${esc(envStr)}</textarea>
+    
+    <label class="config-label" style="margin-top: 8px; display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" class="mcp-disabled" ${srv.disabled ? 'checked' : ''}> Disabled
+    </label>
+  `;
+  div.querySelector('.remove-mcp').onclick = () => div.remove();
+  mc.appendChild(div);
+}
+
+$('openMcpModalBtn').onclick = openMcpSettings;
+$('mcpClose').onclick = () => $('mcpModal').classList.remove('open');
+$('addMcpBtn').onclick = () => addMcpUI('new-mcp', {command: [], environment: {}});
+
+$('mcpSave').onclick = async () => {
+  const servers = {};
+  Array.from(document.querySelectorAll('.mcp-item')).forEach(el => {
+    const id = el.querySelector('.mcp-id').value.trim();
+    if (!id) return;
+    const cmdStr = el.querySelector('.mcp-cmd').value.trim();
+    const envStr = el.querySelector('.mcp-env').value;
+    const disabled = el.querySelector('.mcp-disabled').checked;
+    
+    // Split command by space
+    const command = cmdStr ? cmdStr.split(' ').filter(c => c) : [];
+    
+    // Parse env
+    const environment = {};
+    envStr.split('\n').forEach(line => {
+      const parts = line.split('=');
+      if (parts.length >= 2) {
+        const k = parts[0].trim();
+        const v = parts.slice(1).join('=').trim();
+        if (k) environment[k] = v;
+      }
+    });
+
+    servers[id] = {
+      type: "local",
+      command: command,
+      environment: environment,
+      disabled: disabled
+    };
+  });
+
+  try {
+    await fetch('/api/config/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ servers: servers })
+    });
+  } catch (e) {
+    console.error('Failed to save mcp config', e);
+  }
+  $('mcpModal').classList.remove('open');
 };
+
+async function openCompactionSettings() {
+  $('settingsModal').classList.remove('open');
+  try {
+    const r = await fetch('/api/config/compaction');
+    const c = await r.json();
+    if (c) {
+      $('cfgCompactionAuto').checked = c.auto || false;
+      $('cfgCompactionTailTurns').value = c.tail_turns || 10;
+      $('cfgCompactionPreserveTokens').value = c.preserve_recent_tokens || 1000;
+      $('cfgCompactionReserved').value = c.reserved || 2000;
+      $('cfgCompactionTruncation').value = c.tool_truncation_limit || 10000;
+      $('cfgCompactionPrune').checked = c.prune || false;
+    }
+  } catch (e) {
+    console.error('Failed to load compaction config', e);
+  }
+  $('compactionModal').classList.add('open');
+}
+
+$('openCompactionBtn').onclick = openCompactionSettings;
+$('compactionClose').onclick = () => $('compactionModal').classList.remove('open');
+
+$('compactionSave').onclick = async () => {
+  const payload = {
+    auto: $('cfgCompactionAuto').checked,
+    tail_turns: parseInt($('cfgCompactionTailTurns').value) || 10,
+    preserve_recent_tokens: parseInt($('cfgCompactionPreserveTokens').value) || 1000,
+    reserved: parseInt($('cfgCompactionReserved').value) || 2000,
+    tool_truncation_limit: parseInt($('cfgCompactionTruncation').value) || 10000,
+    prune: $('cfgCompactionPrune').checked,
+  };
+
+  try {
+    await fetch('/api/config/compaction', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    console.error('Failed to save compaction config', e);
+  }
+  $('compactionModal').classList.remove('open');
+};
+
 $('send').onclick = send;
 $('stopBtn').onclick = stopRun;
 $('attachBtn').onclick = () => $('fileInput').click();

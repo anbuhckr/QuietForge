@@ -18,6 +18,10 @@ func (r *Registry) Register(tool Tool) {
 	r.tools[tool.ID()] = tool
 }
 
+func (r *Registry) RemoveTool(id string) {
+	delete(r.tools, id)
+}
+
 func (r *Registry) GetTool(id string) (Tool, error) {
 	tool, exists := r.tools[id]
 	if !exists {
