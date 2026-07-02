@@ -9,6 +9,7 @@ import (
 	"quietforge/permission"
 	"quietforge/provider"
 	"quietforge/tool"
+	"quietforge/util"
 )
 
 const (
@@ -92,6 +93,11 @@ func (sp *SessionProcessor) ProcessToolCall(tc provider.ToolCall, session *Sessi
 	if err != nil {
 		return &tool.ToolResult{Output: fmt.Sprintf("Tool execution error: %v", err), Error: "execution_error"}
 	}
+	
+	if result != nil && result.Output != "" {
+		result.Output = util.TruncateToolOutput(result.Output)
+	}
+	
 	return result
 }
 

@@ -52,10 +52,21 @@ func NeedsCompaction(totalTokens int, usableTokens int) bool {
 }
 
 func GetPruneTarget(totalTokens int, usableTokens int) int {
-	excess := totalTokens - usableTokens
-	target := totalTokens - excess - PruneMinimum
+	// Give a 30% runway so compaction doesn't trigger repeatedly every few turns
+	target := int(float64(usableTokens) * 0.7)
 	if target < PruneMinimum {
 		return PruneMinimum
 	}
 	return target
+}
+
+func GetSummaryReserve(config map[string]any) int {
+	if config != nil {
+		if r, ok := config["summary_reserve"].(float64); ok && r > 0 {
+			return int(r)
+		} else if r, ok := config["summary_reserve"].(int); ok && r > 0 {
+			return r
+		}
+	}
+	return 2000
 }

@@ -1,12 +1,14 @@
 package implement
 
 import (
-	"quietforge/tool"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+
+	"quietforge/storage"
+	"quietforge/tool"
+	"quietforge/util"
 )
 
 type EditTool struct{}
@@ -47,9 +49,9 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		return &tool.ToolResult{Error: "invalid_args", Output: err.Error()}, nil
 	}
 
-	pathStr := params.FilePath
-	if !filepath.IsAbs(pathStr) && ctx.Workspace != "" {
-		pathStr = filepath.Join(ctx.Workspace, pathStr)
+	pathStr, err := util.JailPath(ctx.Workspace, params.FilePath)
+	if err != nil {
+		return &tool.ToolResult{Error: "access_denied", Output: err.Error()}, nil
 	}
 
 	contentBytes, err := os.ReadFile(pathStr)
@@ -115,6 +117,10 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 	if err := os.WriteFile(pathStr, []byte(newContent), 0644); err != nil {
 		return &tool.ToolResult{Error: "write_error", Output: err.Error()}, nil
 	}
+	
+	if repo, ok := ctx.Extra["repo"].(*storage.Repository); ok && repo != nil {
+		tool.GlobalLspManager.NotifyFileChanged(ctx.Workspace, pathStr, newContent, repo)
+	}
 
 	s := ""
 	if count > 1 {
@@ -140,4 +146,3 @@ func splitLinesKeepEnds(s string) []string {
 	}
 	return lines
 }
-

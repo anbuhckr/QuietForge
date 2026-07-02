@@ -17,9 +17,11 @@ The backend is intentionally kept *thin*. Instead of micro-managing the AI, Quie
 * **Artifact-Based Memory:** QuietForge actively refuses to "memorize" complex architectures or long checklists in its active context window. Instead, it relies on an externalized file system brain (e.g., writing `implementation_plan.md` to disk) to track its thoughts and designs, preventing hallucination bugs and context fatigue.
 * **Native Swarms:** When tackling massive codebases, QuietForge can use the `invoke_subagent` tool to seamlessly spin up multiple parallel workers. These sub-agents run asynchronously in completely isolated Goroutines and database sessions, allowing them to independently read, plan, and report back without freezing your main UI.
 * **Native Git Integration:** QuietForge inherently utilizes Git under the hood. It tracks file diffs, takes pre-execution snapshots, and leverages Git worktrees for isolated agent sandboxing. It features a built-in `revert_workspace` tool for the agent to autonomously reset code, and allows the user to instantly revert specific file changes—or roll back the *entire conversation's* codebase changes—directly from the chat UI.
-* **Structured JSON Compaction:** Long conversation histories are automatically compacted into dense, highly-structured JSON summaries. This ensures the agent never loses its train of thought across multi-day coding sessions.
+* **Hybrid SQLite Memory Architecture:** QuietForge solves the "long-term token creep" problem natively. Conversation histories and project plans are compacted into lightweight JSON state, while the massive, project-wide Workspace Graph and Architectural Rules are safely pushed into a persistent SQLite database. The agent only reads the files it is currently editing, and actively queries the database for everything else—allowing sessions to stretch infinitely without blowing up the context window.
 * **Stateful Task Management:** Utilizing the built-in `todowrite` SQLite database tool, QuietForge autonomously converts markdown plans into dynamic, trackable checklists so it always knows exactly what step it is on.
 * **Multi-Agent Routing Profiles:** QuietForge features distinct "brains" (Plan, Build, General, Explore) each equipped with specific tools and permissions, ensuring the right agent tackles the right phase of your project.
+* **Semantic Embeddings Database:** QuietForge integrates background vector generation (using OpenAI's embedding model or local alternatives). It stores code symbol and chunk vectors in SQLite, enabling real-time semantic retrieval during agent turns.
+* **Automatic Diagnostic Tracking:** QuietForge intercepts terminal outputs and compilation/test failures, extracts syntax or reference errors, and caches them in a structured diagnostics database to help the agent auto-correct bugs.
 
 ## 🌟 What Makes It Different?
 
@@ -27,14 +29,15 @@ While there are many AI coding assistants out there, QuietForge stands apart in 
 * **Blazing Fast Backend:** Written in pure Go with a lightweight Preact frontend, completely side-stepping the heavy overhead of Python backends or bloated Electron wrappers.
 * **True Concurrent Swarms:** Unlike other frameworks that just simulate agent loops sequentially, QuietForge leverages **Go Goroutines**. Background sub-agents run truly concurrently, each with their own isolated SQLite database, meaning your main UI and thought-process never freeze.
 * **AST-Driven Context Skimming:** Instead of blindly passing thousands of lines of raw code to the LLM, QuietForge uses `go-tree-sitter` to parse Abstract Syntax Trees. It can intelligently strip out massive function bodies on the fly, feeding the agent a condensed "skeleton" of the codebase to skim architectures infinitely faster without blowing up the token window.
-* **Deterministic State Management:** Instead of hoping the LLM "remembers" its checklist across 100 turns, QuietForge mathematically enforces state. Plans are written to physical markdown files on disk. Tasks are tracked via SQLite rows. The agent's brain is externally anchored.
+* **Multi-Level Context Compression & Token Caching:** When context space gets tight, QuietForge automatically caches token counts on messages to boost speeds and triggers a 3-level compression algorithm (truncating large tool outputs down to 8K or 1K characters, or substituting them with semantic database lookups) to prevent context limit errors.
+* **Deterministic State Management:** Instead of hoping the LLM "remembers" its checklist across 100 turns, QuietForge mathematically enforces state. Plans are written to physical markdown files on disk. Tasks and Workspace Graphs are tracked via SQLite rows. The agent's brain is externally anchored.
 * **Radical Transparency:** You have 100% control. The SQLite sessions database, the prompt text files, the system logs, and the artifacts are all exposed in your workspace. You can edit the agent's core instructions mid-session just by tweaking a `.txt` file.
 
 ## 🛠️ Built-In Tools
 
 QuietForge provides its AI agents with a massive arsenal of capabilities:
-- **Code Intelligence:** Native `lsp` (Language Server Protocol) and `ast_search` for semantic codebase navigation.
-- **System Access:** Full terminal access (`shell`), precise file modifications (`edit`, `apply_patch`, `write`), and semantic codebase querying (`grep`, `glob`).
+- **Code Intelligence:** Centralized, concurrent `LspManager` that runs language servers (`gopls`, `typescript-language-server`, `pylsp`, `rust-analyzer`) on demand, synchronizing modifications via JSON-RPC, alongside native `ast_search` for semantic codebase navigation.
+- **System Access:** Hardened file access tools (`edit`, `apply_patch` utilizing path-jailing to protect the workspace), precise creation (`write`), full terminal execution (`shell`), and semantic queries (`grep`, `glob`).
 - **Web Navigation:** Autonomous web searching (`websearch`) and fetching (`webfetch`) for digging through documentation.
 - **Extensibility:** First-class support for MCP (Model Context Protocol) servers, allowing you to plug in any external tools.
 

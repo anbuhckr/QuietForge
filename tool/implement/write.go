@@ -1,12 +1,14 @@
 package implement
 
 import (
-	"quietforge/tool"
-	"quietforge/util"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"quietforge/storage"
+	"quietforge/tool"
+	"quietforge/util"
 )
 
 type WriteTool struct{}
@@ -50,6 +52,10 @@ func (t *WriteTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 
 	if err := os.WriteFile(pathStr, []byte(params.Content), 0644); err != nil {
 		return &tool.ToolResult{Error: "write_error", Output: fmt.Sprintf("Failed to write file: %v", err)}, nil
+	}
+	
+	if repo, ok := ctx.Extra["repo"].(*storage.Repository); ok && repo != nil {
+		tool.GlobalLspManager.NotifyFileChanged(ctx.Workspace, pathStr, params.Content, repo)
 	}
 
 	return &tool.ToolResult{

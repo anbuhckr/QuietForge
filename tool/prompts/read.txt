@@ -1,5 +1,6 @@
 Read existing files. Always read files before editing them.
 - Read full files or specific line ranges using offset/limit
+- IMPORTANT: Use `compact: true` when surveying large files to strip out function bodies and view only the skeleton. This saves massive amounts of tokens.
 - Returns content with line numbers prefixed (e.g., `1: def foo():`)
 - Directory listing when path is a directory
 - If file does not exist, returns error

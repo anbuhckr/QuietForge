@@ -4,3 +4,5 @@ Write new files or overwrite existing ones.
 - Use for creating new files or replacing entire files
 - For partial edits, use edit or apply_patch instead
 - Always read a file first before overwriting it
+- IMPORTANT: After creating or significantly modifying a file, you MUST use the `workspace(upsert_file)` tool to update its purpose in the persistent project memory.
+- CRITICAL: To save output tokens and increase speed, you are FORBIDDEN from using this `write` tool to edit existing files. You MUST use the `edit` or `apply_patch` tools to make precise line-changes instead of lazily rewriting the entire file.

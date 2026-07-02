@@ -19,7 +19,7 @@ func LoadPromptTemplate(name string) string {
 	return ""
 }
 
-func BuildSystemPrompt(agentID string, tools []map[string]any, env map[string]string, extraInstructions []string, workspace string) string {
+func BuildSystemPrompt(agentID string, tools []map[string]any, env map[string]string, extraInstructions []string, workspace string, globalArch string) string {
 	templateName := agentID + "_system"
 
 	system := LoadPromptTemplate(templateName)

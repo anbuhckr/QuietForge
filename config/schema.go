@@ -39,6 +39,15 @@ type AgentConfig struct {
 	Steps       *int      		`json:"steps,omitempty"`
 }
 
+
+// EmbeddingConfig holds settings for semantic retrieval
+type EmbeddingConfig struct {
+	Enabled bool    `json:"enabled"`
+	Model   *string `json:"model,omitempty"`
+	APIKey  *string `json:"api_key,omitempty"`
+	BaseURL *string `json:"base_url,omitempty"`
+}
+
 // CompactionConfig handles conversation history management.
 type CompactionConfig struct {
 	Auto                 bool `json:"auto"`
@@ -64,8 +73,6 @@ type McpConfig struct {
 
 // Config is the top-level configuration object.
 type Config struct {
-	Model             *string                    `json:"model,omitempty"`
-	ContextWindow     *int                       `json:"context_window,omitempty"`
 	Provider          map[string]ProviderConfig  `json:"provider"`
 	Agent             map[string]AgentConfig     `json:"agent"`
 	Permission        map[string]any     		 `json:"permission"`
@@ -75,6 +82,7 @@ type Config struct {
 	Mcp               *McpConfig                 `json:"mcp,omitempty"`
 	Username          *string                    `json:"username,omitempty"`
 	Compaction        *CompactionConfig          `json:"compaction,omitempty"`
+	Embedding         *EmbeddingConfig           `json:"embedding,omitempty"`
 	Instructions      []string                   `json:"instructions"`
 	DefaultAgent      *string                    `json:"default_agent,omitempty"`
 	Mode              map[string]any     		 `json:"mode"`

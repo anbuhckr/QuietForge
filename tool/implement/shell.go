@@ -26,7 +26,32 @@ func (t *ShellTool) ID() string {
 }
 
 func (t *ShellTool) Description() string {
-	return "Execute shell commands asynchronously with optional timeout."
+	desc := "Execute shell commands asynchronously with optional timeout. Supports background task execution via the `background` parameter.\n\n"
+	
+	if runtime.GOOS == "windows" {
+		desc += `Windows PowerShell Notes:
+- The shell is executed using powershell.exe.
+- If commands depend on each other, DO NOT use '&&' as Windows PowerShell 5.1 does not support it. Use 'cmd1; if ($?) { cmd2 }' instead.
+- Use double quotes for paths with spaces and interpolated strings.
+- Prefer full cmdlet names (e.g., Get-ChildItem) over aliases.
+- Avoid 'cd <dir> && <cmd>'. Use the 'workdir' parameter instead.
+`
+	} else {
+		desc += `Bash Notes:
+- The shell is executed using sh.
+- Use '&&' to chain dependent commands (e.g., 'mkdir out && ls out').
+- Avoid 'cd <dir> && <cmd>'. Use the 'workdir' parameter instead.
+`
+	}
+	
+	desc += `
+General Guidance:
+- Directory Verification: Before creating files/directories, verify the parent exists.
+- Quoting: Always quote file paths that contain spaces.
+- Background Tasks: Set 'background': true for long-running processes (e.g., starting a server). You will receive an event when it completes.
+- Binary Output: The shell automatically detects binary outputs (e.g., images) and converts them to Data URIs.`
+
+	return desc
 }
 
 func (t *ShellTool) Parameters() map[string]interface{} {

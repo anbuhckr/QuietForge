@@ -14,3 +14,4 @@ new code here
 >>>>>>> REPLACE
 ```
 - Prefer edit tool for simple single replacements
+- CRITICAL COST SAVINGS: In your SEARCH block, use the absolute MINIMUM number of lines needed to uniquely match (usually 1-3 lines). Do NOT output large blocks of unchanged code.

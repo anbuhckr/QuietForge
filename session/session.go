@@ -180,14 +180,8 @@ func (s *Session) ReplaceMessages(msgs []Message) error {
 	if s.Repo == nil {
 		return nil
 	}
-	_, err := s.Repo.DB.Conn.Exec("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", s.SessionID)
-	if err != nil {
-		return err
-	}
-	_, err = s.Repo.DB.Conn.Exec("DELETE FROM messages WHERE session_id = ?", s.SessionID)
-	if err != nil {
-		return err
-	}
+	messageRows := make([]storage.MessageRow, 0, len(msgs))
+	partsByMessage := make(map[string][]storage.MessagePartRow, len(msgs))
 	for _, msg := range msgs {
 		msgRow := storage.MessageRow{
 			ID:        msg.ID,
@@ -217,11 +211,10 @@ func (s *Session) ReplaceMessages(msgs []Message) error {
 				Arguments:  args,
 			}
 		}
-		if err := s.Repo.CreateMessage(msgRow, partRows); err != nil {
-			return err
-		}
+		messageRows = append(messageRows, msgRow)
+		partsByMessage[msg.ID] = partRows
 	}
-	return nil
+	return s.Repo.ReplaceMessages(s.SessionID, messageRows, partsByMessage)
 }
 
 func (s *Session) SetAgent(agentID string) {
@@ -259,10 +252,13 @@ func (s *Session) AddMessage(message Message) error {
 				Content:    p.Content,
 				ToolCallID: p.ToolCallID,
 				ToolName:   p.ToolName,
-				Arguments:  func() string { 
-					if p.Arguments == nil { return "" }
+				Arguments: func() string {
+					if p.Arguments == nil {
+						return ""
+					}
 					switch v := p.Arguments.(type) {
-					case string: return v
+					case string:
+						return v
 					default:
 						b, _ := json.Marshal(v)
 						return string(b)

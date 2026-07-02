@@ -59,7 +59,13 @@ func (r *Repository) CreateMessage(message MessageRow, parts []MessagePartRow) e
 	if err != nil {
 		meta = []byte("{}")
 	}
-	_, err = r.DB.Conn.Exec(
+	tx, err := r.DB.Conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(
 		"INSERT INTO messages (id, session_id, role, created_at, metadata) VALUES (?, ?, ?, ?, ?)",
 		message.ID, message.SessionID, message.Role, message.CreatedAt, string(meta),
 	)
@@ -67,7 +73,7 @@ func (r *Repository) CreateMessage(message MessageRow, parts []MessagePartRow) e
 		return err
 	}
 	for _, part := range parts {
-		_, err = r.DB.Conn.Exec(
+		_, err = tx.Exec(
 			"INSERT INTO message_parts (message_id, type, content, tool_call_id, tool_name, arguments) VALUES (?, ?, ?, ?, ?, ?)",
 			part.MessageID, part.Type, nullString(part.Content), nullString(part.ToolCallID), nullString(part.ToolName), nullString(part.Arguments),
 		)
@@ -75,7 +81,7 @@ func (r *Repository) CreateMessage(message MessageRow, parts []MessagePartRow) e
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (r *Repository) UpdateMessageMetadata(messageID string, metadata map[string]any) error {
@@ -229,14 +235,64 @@ func (r *Repository) DeleteSession(sessionID string) (bool, error) {
 		return false, nil
 	}
 
-	r.DB.Conn.Exec("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", actualID)
-	r.DB.Conn.Exec("DELETE FROM messages WHERE session_id = ?", actualID)
-	r.DB.Conn.Exec("DELETE FROM todos WHERE session_id = ?", actualID)
-	_, err := r.DB.Conn.Exec("DELETE FROM sessions WHERE id = ?", actualID)
+	tx, err := r.DB.Conn.Begin()
 	if err != nil {
 		return false, err
 	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", actualID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec("DELETE FROM messages WHERE session_id = ?", actualID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec("DELETE FROM todos WHERE session_id = ?", actualID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", actualID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func (r *Repository) ReplaceMessages(sessionID string, messages []MessageRow, partsByMessage map[string][]MessagePartRow) error {
+	tx, err := r.DB.Conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM messages WHERE session_id = ?", sessionID); err != nil {
+		return err
+	}
+	for _, message := range messages {
+		meta, err := json.Marshal(message.Metadata)
+		if err != nil {
+			meta = []byte("{}")
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO messages (id, session_id, role, created_at, metadata) VALUES (?, ?, ?, ?, ?)",
+			message.ID, message.SessionID, message.Role, message.CreatedAt, string(meta),
+		); err != nil {
+			return err
+		}
+		for _, part := range partsByMessage[message.ID] {
+			if _, err := tx.Exec(
+				"INSERT INTO message_parts (message_id, type, content, tool_call_id, tool_name, arguments) VALUES (?, ?, ?, ?, ?, ?)",
+				part.MessageID, part.Type, nullString(part.Content), nullString(part.ToolCallID), nullString(part.ToolName), nullString(part.Arguments),
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func nullString(s string) sql.NullString {
@@ -246,3 +302,247 @@ func nullString(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
+func (r *Repository) UpsertWorkspaceFile(file WorkspaceFileRow) error {
+	_, err := r.DB.Conn.Exec(`
+		INSERT INTO workspace_files (workspace, path, purpose, file_hash, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(workspace, path) DO UPDATE SET
+			purpose = COALESCE(excluded.purpose, purpose),
+			file_hash = excluded.file_hash,
+			updated_at = excluded.updated_at
+	`, file.Workspace, file.Path, file.Purpose, file.FileHash, file.UpdatedAt)
+	return err
+}
+
+func (r *Repository) UpsertWorkspaceSymbol(sym WorkspaceSymbolRow) error {
+	_, err := r.DB.Conn.Exec(`
+		INSERT INTO workspace_symbols (id, workspace, path, name, type, line_start, line_end, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			type = excluded.type,
+			line_start = excluded.line_start,
+			line_end = excluded.line_end,
+			updated_at = excluded.updated_at
+	`, sym.ID, sym.Workspace, sym.Path, sym.Name, sym.Type, sym.LineStart, sym.LineEnd, sym.UpdatedAt)
+	return err
+}
+
+func (r *Repository) DeleteWorkspaceSymbolsByPath(workspace, path string) error {
+	_, err := r.DB.Conn.Exec("DELETE FROM workspace_symbols WHERE workspace = ? AND path = ?", workspace, path)
+	return err
+}
+
+func (r *Repository) ListWorkspaceSymbols(workspace string) ([]WorkspaceSymbolRow, error) {
+	rows, err := r.DB.Conn.Query("SELECT id, workspace, path, name, type, line_start, line_end, updated_at FROM workspace_symbols WHERE workspace = ? ORDER BY path, line_start", workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var syms []WorkspaceSymbolRow
+	for rows.Next() {
+		var s WorkspaceSymbolRow
+		if err := rows.Scan(&s.ID, &s.Workspace, &s.Path, &s.Name, &s.Type, &s.LineStart, &s.LineEnd, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+		syms = append(syms, s)
+	}
+	return syms, rows.Err()
+}
+
+
+func (r *Repository) ListWorkspaceFiles(workspace string) ([]WorkspaceFileRow, error) {
+	rows, err := r.DB.Conn.Query("SELECT path, workspace, purpose, file_hash, updated_at FROM workspace_files WHERE workspace = ? ORDER BY path ASC", workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []WorkspaceFileRow
+	for rows.Next() {
+		var f WorkspaceFileRow
+		var purpose sql.NullString
+		var hash sql.NullString
+		if err := rows.Scan(&f.Path, &f.Workspace, &purpose, &hash, &f.UpdatedAt); err != nil {
+			return nil, err
+		}
+		f.Purpose = purpose.String
+		f.FileHash = hash.String
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+func (r *Repository) CreateArchitecture(arch ArchitectureRow) error {
+	table := "architecture_decisions"
+	if arch.Type == "constraint" {
+		table = "architecture_constraints"
+	}
+
+	// id is primary key.
+	query := fmt.Sprintf("INSERT INTO %s (id, workspace, %s, updated_at) VALUES (?, ?, ?, ?)", table, "decision")
+	if arch.Type == "constraint" {
+		query = fmt.Sprintf("INSERT INTO %s (id, workspace, %s, updated_at) VALUES (?, ?, ?, ?)", table, "constraint_text")
+	}
+
+	_, err := r.DB.Conn.Exec(query, arch.ID, arch.Workspace, arch.Text, arch.UpdatedAt)
+	return err
+}
+
+func (r *Repository) ListArchitecture(workspace string, archType string) ([]ArchitectureRow, error) {
+	table := "architecture_decisions"
+	column := "decision"
+	if archType == "constraint" {
+		table = "architecture_constraints"
+		column = "constraint_text"
+	}
+
+	query := fmt.Sprintf("SELECT id, workspace, %s, updated_at FROM %s WHERE workspace = ? ORDER BY updated_at ASC", column, table)
+	rows, err := r.DB.Conn.Query(query, workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var archs []ArchitectureRow
+	for rows.Next() {
+		var a ArchitectureRow
+		a.Type = archType
+		if err := rows.Scan(&a.ID, &a.Workspace, &a.Text, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		archs = append(archs, a)
+	}
+	return archs, rows.Err()
+}
+
+func (r *Repository) SyncWorkspaceFacts(workspace string, path string, hash string, symbols []WorkspaceSymbolRow, edges []WorkspaceEdgeRow) error {
+	tx, err := r.DB.Conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 1. Delete old symbols & edges
+	_, err = tx.Exec("DELETE FROM workspace_symbols WHERE workspace = ? AND path = ?", workspace, path)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec("DELETE FROM workspace_edges WHERE workspace = ? AND source_path = ?", workspace, path)
+	if err != nil {
+		return err
+	}
+
+	var updated int64 = 0
+	if len(symbols) > 0 {
+		updated = symbols[0].UpdatedAt
+	}
+
+	// 2. Upsert File Hash (keep purpose intact)
+	_, err = tx.Exec(`
+		INSERT INTO workspace_files (workspace, path, file_hash, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace, path) DO UPDATE SET
+			file_hash = excluded.file_hash,
+			updated_at = excluded.updated_at
+	`, workspace, path, hash, updated)
+	if err != nil {
+		return err
+	}
+
+	// 3. Insert new symbols
+	for _, sym := range symbols {
+		_, err = tx.Exec(`
+			INSERT INTO workspace_symbols (id, workspace, path, name, type, line_start, line_end, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, sym.ID, sym.Workspace, sym.Path, sym.Name, sym.Type, sym.LineStart, sym.LineEnd, sym.UpdatedAt)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 4. Insert new edges
+	for _, edge := range edges {
+		_, err = tx.Exec(`
+			INSERT INTO workspace_edges (id, workspace, source_path, target_path, edge_type)
+			VALUES (?, ?, ?, ?, ?)
+		`, edge.ID, edge.Workspace, edge.SourcePath, edge.TargetPath, edge.EdgeType)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (r *Repository) DeleteWorkspaceFileAndFacts(workspace string, path string) error {
+	tx, err := r.DB.Conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec("DELETE FROM workspace_symbols WHERE workspace = ? AND path = ?", workspace, path)
+	if err != nil { return err }
+	_, err = tx.Exec("DELETE FROM workspace_edges WHERE workspace = ? AND source_path = ?", workspace, path)
+	if err != nil { return err }
+	_, err = tx.Exec("DELETE FROM workspace_files WHERE workspace = ? AND path = ?", workspace, path)
+	if err != nil { return err }
+
+	return tx.Commit()
+}
+
+func (r *Repository) GetSymbolByName(workspace, name string) ([]WorkspaceSymbolRow, error) {
+	rows, err := r.DB.Conn.Query("SELECT id, workspace, path, name, type, line_start, line_end, updated_at FROM workspace_symbols WHERE workspace = ? AND name = ? ORDER BY path, line_start", workspace, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var syms []WorkspaceSymbolRow
+	for rows.Next() {
+		var s WorkspaceSymbolRow
+		if err := rows.Scan(&s.ID, &s.Workspace, &s.Path, &s.Name, &s.Type, &s.LineStart, &s.LineEnd, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+		syms = append(syms, s)
+	}
+	return syms, rows.Err()
+}
+
+func (r *Repository) GetIncomingEdges(workspace, targetPath string) ([]WorkspaceEdgeRow, error) {
+	rows, err := r.DB.Conn.Query("SELECT id, workspace, source_path, target_path, edge_type FROM workspace_edges WHERE workspace = ? AND target_path = ?", workspace, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var edges []WorkspaceEdgeRow
+	for rows.Next() {
+		var e WorkspaceEdgeRow
+		if err := rows.Scan(&e.ID, &e.Workspace, &e.SourcePath, &e.TargetPath, &e.EdgeType); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+func (r *Repository) GetOutgoingEdges(workspace, sourcePath string) ([]WorkspaceEdgeRow, error) {
+	rows, err := r.DB.Conn.Query("SELECT id, workspace, source_path, target_path, edge_type FROM workspace_edges WHERE workspace = ? AND source_path = ?", workspace, sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var edges []WorkspaceEdgeRow
+	for rows.Next() {
+		var e WorkspaceEdgeRow
+		if err := rows.Scan(&e.ID, &e.Workspace, &e.SourcePath, &e.TargetPath, &e.EdgeType); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}

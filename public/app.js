@@ -158,7 +158,7 @@ async function fetchSuggestions(qObj) {
   const r = await fetch(endpoint + '?q=' + encodeURIComponent(qObj.query || ''));
   if (!r.ok) return [];
   const items = await r.json();
-  return items.map(item => ({ ...item, prefix: qObj.prefix }));
+  return (items || []).map(item => ({ ...item, prefix: qObj.prefix }));
 }
 
 function renderSuggestions() {
@@ -401,11 +401,14 @@ class ConversationState {
               let lastIndex = 0;
               let match;
               while ((match = regex.exec(content)) !== null) {
-                  const think = match[1].trim();
+                  let think = match[1].trim();
                   const toolName = match[2];
                   const toolInput = match[3];
                   let toolStr = `${toolName} ${toolInput}`;
                   try { toolStr = this.formatToolCall(toolStr); } catch(e) {}
+                  if (think && /\[Thought process omitted/i.test(think)) {
+                      think = null;
+                  }
                   turn.liveContainer.push({ think: think || null, tools: [toolStr] });
                   lastIndex = regex.lastIndex;
               }
@@ -425,7 +428,7 @@ class ConversationState {
               if (thinkMatch) {
                   textContent = thinkMatch[1].trim();
               }
-              if (!textContent.includes('[Thought process omitted for context limits]')) {
+              if (!/\[Thought process omitted/i.test(textContent)) {
                   think = (think || '') + textContent;
               }
             } else if (p.type === 'tool_use') {
@@ -458,7 +461,7 @@ class ConversationState {
     if (!rawText) return;
 
     if (kind === 'think') {
-      if (rawText.includes('[Thought process omitted for context limits]')) return;
+      if (/\[Thought process omitted/i.test(rawText)) return;
       if (turn.liveContainer.length === 0 || turn.liveContainer[turn.liveContainer.length - 1].tools.length > 0) {
         turn.liveContainer.push({ think: rawText, tools: [] });
       } else {
@@ -2845,3 +2848,49 @@ if (btnNewFolder) {
 }
 
 
+
+
+// Semantic Embedding Settings
+async function openEmbeddingSettings() {
+  $('settingsModal').classList.remove('open');
+  try {
+    const res = await fetch('/api/config/embedding');
+    const data = await res.json();
+    if (data.embedding) {
+      $('cfgEmbeddingEnabled').checked = !!data.embedding.enabled;
+      $('cfgEmbeddingBaseURL').value = data.embedding.base_url || '';
+      $('cfgEmbeddingModel').value = data.embedding.model || '';
+      $('cfgEmbeddingAPIKey').value = data.embedding.api_key || '';
+    } else {
+      $('cfgEmbeddingEnabled').checked = false;
+      $('cfgEmbeddingBaseURL').value = '';
+      $('cfgEmbeddingModel').value = '';
+      $('cfgEmbeddingAPIKey').value = '';
+    }
+  } catch(e) {
+    console.error(e);
+  }
+  $('embeddingModal').classList.add('open');
+}
+
+$('openEmbeddingBtn').onclick = openEmbeddingSettings;
+$('embeddingClose').onclick = () => $('embeddingModal').classList.remove('open');
+$('embeddingSave').onclick = async () => {
+  const payload = {
+    enabled: $('cfgEmbeddingEnabled').checked,
+    base_url: $('cfgEmbeddingBaseURL').value,
+    model: $('cfgEmbeddingModel').value,
+    api_key: $('cfgEmbeddingAPIKey').value
+  };
+  try {
+    await fetch('/api/config/embedding', {
+      method: 'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    $('embeddingModal').classList.remove('open');
+    showNotification("Embedding settings saved", "success");
+  } catch(e) {
+    showNotification("Error saving embedding settings", "error");
+  }
+};

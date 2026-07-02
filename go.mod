@@ -7,14 +7,12 @@ require (
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/sashabaranov/go-openai v1.41.2
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
-	github.com/sqweek/dialog v0.0.0-20260123140253-64c163d53aac
 	github.com/traefik/yaegi v0.16.1
 	modernc.org/sqlite v1.53.0
 )
 
 require (
 	github.com/JohannesKaufmann/dom v0.3.1 // indirect
-	github.com/TheTitanrain/w32 v0.0.0-20180517000239-4f5cfb03fabf // indirect
 	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

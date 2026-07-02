@@ -47,11 +47,11 @@ func (pm *PromptManager) BuildSystemPrompt(agentID string, toolDefinitions []map
 		}
 	}
 
-	pm.SystemPrompt = BuildSystemPrompt(agentID, toolDefinitions, env, extraInstructions, workspace)
+	pm.SystemPrompt = BuildSystemPrompt(agentID, toolDefinitions, env, extraInstructions, workspace, "") // Updated via main.go hook
 	return pm.SystemPrompt
 }
 
-func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, modelContext int, client *provider.Client, onProgress func(string)) []Message {
+func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, modelContext int, client *provider.Client, onProgress func(string), dynamicContext string) []Message {
 	history := pm.Session.GetHistory()
 
 	for i, msg := range history {
@@ -78,11 +78,16 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 		history = CompactMessages(ctx, history, compactCfg, modelContext, client, onProgress)
 	}
 
+	finalSystemPrompt := pm.SystemPrompt
+	if dynamicContext != "" {
+		finalSystemPrompt = finalSystemPrompt + "\n\n# Dynamic Turn Context\n" + dynamicContext
+	}
+
 	systemMsg := Message{
 		ID:        "system-0",
 		SessionID: pm.Session.SessionID,
 		Role:      "system",
-		Parts:     []MessagePart{{Type: "text", Content: pm.SystemPrompt}},
+		Parts:     []MessagePart{{Type: "text", Content: finalSystemPrompt}},
 	}
 
 	allMsgs := append([]Message{systemMsg}, history...)

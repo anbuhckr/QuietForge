@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"bufio"
 	"context"
 	"crypto/sha256"
@@ -23,6 +24,7 @@ import (
 
 	"quietforge/agent"
 	"quietforge/config"
+	qctx "quietforge/context"
 	"quietforge/permission"
 	"quietforge/provider"
 	"quietforge/session"
@@ -30,6 +32,7 @@ import (
 	"quietforge/tool"
 	impl "quietforge/tool/implement"
 	"quietforge/util"
+	wspkg "quietforge/workspace"
 
 	"github.com/sashabaranov/go-openai"
 
@@ -53,18 +56,19 @@ var (
 	eventsMu           sync.Mutex
 	// token usage stored per-session in activeSession.PromptTokens / CompletionTokens
 
-
 	bgProcesses   = make(map[string]context.CancelFunc)
 	bgProcessesMu sync.Mutex
 
-	toolRegistry    *tool.Registry
-	mcpManager      *tool.McpManager
+	toolRegistry      *tool.Registry
+	mcpManager        *tool.McpManager
+	workspaceObserver *wspkg.Observer
+	ctxOrchestrator   *qctx.Orchestrator
 
-	appCfg          config.Config
-	workspaceDir    string
+	appCfg           config.Config
+	workspaceDir     string
 	needsFullRefresh bool
-	db           *storage.Database
-	repo         *storage.Repository
+	db               *storage.Database
+	repo             *storage.Repository
 )
 
 type SSHProcess struct {
@@ -107,25 +111,33 @@ func buildProviderInstance(id, apiKey, baseURL, model string, disableVision bool
 
 func clientFromCfg(cfg config.Config) *provider.Client {
 	globalModel := "gpt-4o"
-	if cfg.Model != nil {
-		globalModel = *cfg.Model
+	if p, ok := cfg.Provider["primary"]; ok && p.Model != nil {
+		globalModel = *p.Model
 	}
-	
+
 	var instances []provider.ProviderInstance
-	
+
 	collect := func(pid string, pc config.ProviderConfig, mdl string) {
 		key := ""
-		if pc.APIKey != nil { key = *pc.APIKey }
+		if pc.APIKey != nil {
+			key = *pc.APIKey
+		}
 		base := ""
-		if pc.BaseURL != nil { base = *pc.BaseURL }
-		if pc.Model != nil { mdl = *pc.Model }
+		if pc.BaseURL != nil {
+			base = *pc.BaseURL
+		}
+		if pc.Model != nil {
+			mdl = *pc.Model
+		}
 		dv := false
-		if pc.DisableVision != nil { dv = *pc.DisableVision }
+		if pc.DisableVision != nil {
+			dv = *pc.DisableVision
+		}
 		if inst := buildProviderInstance(pid, key, base, mdl, dv); inst != nil {
 			instances = append(instances, *inst)
 		}
 	}
-	
+
 	added := make(map[string]bool)
 	for _, pid := range cfg.EnabledProviders {
 		if pc, ok := cfg.Provider[pid]; ok {
@@ -133,7 +145,7 @@ func clientFromCfg(cfg config.Config) *provider.Client {
 			added[pid] = true
 		}
 	}
-	
+
 	for pid, pc := range cfg.Provider {
 		if !added[pid] {
 			collect(pid, pc, globalModel)
@@ -145,7 +157,7 @@ func clientFromCfg(cfg config.Config) *provider.Client {
 			instances = append(instances, *inst)
 		}
 	}
-	
+
 	return provider.NewMultiClient(instances, globalModel)
 }
 
@@ -172,7 +184,7 @@ func promoteFallbackProvider(c *provider.Client, addEvt func(string, map[string]
 				if idx > 0 {
 					eps = append(eps[:idx], eps[idx+1:]...)
 					eps = append([]interface{}{successID}, eps...)
-					
+
 					if pMap, ok := rawCfg["provider"].(map[string]any); ok {
 						newProvMap := make(map[string]any)
 						var newEps []interface{}
@@ -194,7 +206,7 @@ func promoteFallbackProvider(c *provider.Client, addEvt func(string, map[string]
 					} else {
 						rawCfg["enabled_providers"] = eps
 					}
-					
+
 					saveRawConfig(rawCfg)
 					appCfg = loadCfg()
 					if addEvt != nil {
@@ -314,7 +326,6 @@ func getSessionLog() []map[string]any {
 	return clean
 }
 
-
 type projectRegistry struct {
 	LastActive string         `json:"last_active"`
 	Projects   []projectEntry `json:"projects"`
@@ -382,7 +393,7 @@ func unregisterProject(path string) string {
 	}
 	pr.Projects = filtered
 	saveProjectRegistry(pr)
-	
+
 	// Only delete .agent if the path is inside the global workspaces root to respect the jail
 	if isAbsPathEqual(filepath.Dir(absPath), util.GlobalWorkspacesRoot) {
 		agentDir := filepath.Join(absPath, ".agent")
@@ -568,7 +579,7 @@ func initWorkspace(path string) {
 			}
 		}
 	}
-	
+
 	// Ensure there is at least one commit so that git stash/diff works for artifact tracking
 	checkCmd := exec.Command("git", "rev-parse", "HEAD")
 	checkCmd.Dir = path
@@ -668,8 +679,6 @@ func buildTree(dirPath, workspaceRoot string) []map[string]any {
 	return tree
 }
 
-
-
 var (
 	flagPassword string
 	flagPort     int
@@ -690,7 +699,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.0.5")
+		fmt.Println("QuietForge v1.0.6")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -722,6 +731,13 @@ func main() {
 	defer db.Close()
 
 	repo = storage.NewRepository(db)
+	workspaceObserver = wspkg.NewObserver(repo, 3) // 3 concurrent workers
+	defer workspaceObserver.Stop()
+	ctxOrchestrator = qctx.NewOrchestrator(repo)
+	if ctxOrchestrator != nil {
+		ctxOrchestrator.AddProvider(qctx.NewExecutionProvider(workspaceDir, appCfg))
+	}
+
 	toolRegistry = tool.NewRegistry()
 	registerTools()
 
@@ -753,7 +769,6 @@ func main() {
 		}
 	}
 	defer mcpManager.Close()
-
 
 	activeConversation = "session_" + fmt.Sprintf("%d", time.Now().Unix())
 
@@ -964,6 +979,7 @@ func registerTools() {
 			},
 		},
 		&impl.TodoWriteTool{},
+		&impl.WorkspaceTool{},
 		&impl.SkillTool{},
 		&impl.LspTool{},
 		&impl.AstSearchTool{},
@@ -1178,29 +1194,31 @@ func setupHealthRoutes(api fiber.Router) {
 				model = *pc.Model
 			}
 		}
-		if model == "gpt-4o" && cfg.Model != nil && *cfg.Model != "" {
-			model = *cfg.Model
+		if model == "gpt-4o" {
+			if p, ok := cfg.Provider["primary"]; ok && p.Model != nil && *p.Model != "" {
+				model = *p.Model
+			}
 		}
 
 		resp := fiber.Map{
-			"status":                 "running",
-			"running":                running,
-			"agent_status":           "V3 Engine Ready",
-			"provider":               "openai_compatible",
-			"model":                  model,
-			"workspace":              activePath,
-			"project":                fiber.Map{"workspace": activePath},
-			"active_conversation_id": activeConversation,
-			"auth_enabled":           auth,
-			"mode":                   mode,
-			"agent":                  agentID,
-			"total_prompt_tokens":    getPromptTokens(),
+			"status":                  "running",
+			"running":                 running,
+			"agent_status":            "V3 Engine Ready",
+			"provider":                "openai_compatible",
+			"model":                   model,
+			"workspace":               activePath,
+			"project":                 fiber.Map{"workspace": activePath},
+			"active_conversation_id":  activeConversation,
+			"auth_enabled":            auth,
+			"mode":                    mode,
+			"agent":                   agentID,
+			"total_prompt_tokens":     getPromptTokens(),
 			"total_completion_tokens": getCompletionTokens(),
-			"input_token_price":      2.50,
-			"output_token_price":     10.00,
-			"features":               fiber.Map{},
-			"stop_requested":         stopRequested,
-			"backend_diagnostics":    fiber.Map{},
+			"input_token_price":       2.50,
+			"output_token_price":      10.00,
+			"features":                fiber.Map{},
+			"stop_requested":          stopRequested,
+			"backend_diagnostics":     fiber.Map{},
 		}
 
 		if !running {
@@ -1238,8 +1256,8 @@ func setupHealthRoutes(api fiber.Router) {
 
 func configToDict(cfg config.Config) map[string]any {
 	d := make(map[string]any)
-	if cfg.Model != nil {
-		d["model"] = *cfg.Model
+	if p, ok := cfg.Provider["primary"]; ok && p.Model != nil {
+		d["model"] = *p.Model
 	}
 	if len(cfg.Provider) > 0 {
 		providers := make(map[string]any, len(cfg.Provider))
@@ -1420,7 +1438,9 @@ func setupChatRoutes(api fiber.Router) {
 			}
 			r := storage.NewRepository(d)
 			debugLog("/chat/delete: deleting from project %s", p.Path)
-			r.DeleteSession(convID)
+			if _, err := r.DeleteSession(convID); err != nil {
+				log.Printf("/chat/delete: failed to delete session %s from %s: %v", convID, p.Path, err)
+			}
 			d.Close()
 		}
 		if convID == activeConversation {
@@ -1566,7 +1586,7 @@ func setupChatRoutes(api fiber.Router) {
 func setupConfigRoutes(api fiber.Router) {
 	api.Get("/config/llm", func(c *fiber.Ctx) error {
 		cfg := loadCfg()
-		
+
 		type providerInfo struct {
 			ID            string `json:"id"`
 			Model         string `json:"model"`
@@ -1576,9 +1596,9 @@ func setupConfigRoutes(api fiber.Router) {
 			ContextWindow int    `json:"context_window"`
 			MaxMessages   int    `json:"max_messages"`
 		}
-		
-		var providers []providerInfo
-		
+
+		providers := make([]providerInfo, 0)
+
 		// Helper to add provider
 		addProv := func(pid string, pc config.ProviderConfig) {
 			key := ""
@@ -1621,38 +1641,11 @@ func setupConfigRoutes(api fiber.Router) {
 				MaxMessages:   mm,
 			})
 		}
-		
-		model := "gpt-4o"
-		if cfg.Model != nil {
-			model = *cfg.Model
-		}
+
 		temperature := 0.0
-		maxMessages := 200
-		contextWindow := 0
 		if cfg.Mode != nil {
 			if v, ok := cfg.Mode["temperature"].(float64); ok {
 				temperature = v
-			}
-			if v, ok := cfg.Mode["max_messages"].(float64); ok {
-				maxMessages = int(v)
-			} else if rawCfg := loadRawConfig(); rawCfg != nil {
-				if v, ok := rawCfg["max_messages"].(float64); ok {
-					maxMessages = int(v)
-				}
-			}
-			if v, ok := cfg.Mode["context_window"].(float64); ok {
-				contextWindow = int(v)
-			} else if rawCfg := loadRawConfig(); rawCfg != nil {
-				if v, ok := rawCfg["context_window"].(float64); ok {
-					contextWindow = int(v)
-				}
-			}
-		} else if rawCfg := loadRawConfig(); rawCfg != nil {
-			if v, ok := rawCfg["max_messages"].(float64); ok {
-				maxMessages = int(v)
-			}
-			if v, ok := rawCfg["context_window"].(float64); ok {
-				contextWindow = int(v)
 			}
 		}
 
@@ -1664,28 +1657,28 @@ func setupConfigRoutes(api fiber.Router) {
 				added[pid] = true
 			}
 		}
-		
+
 		// Add remaining
 		for pid, pc := range cfg.Provider {
 			if !added[pid] {
 				addProv(pid, pc)
 			}
 		}
-		
+
 		if len(providers) == 0 {
 			providers = append(providers, providerInfo{ID: "openai_compatible"})
 		}
 
-		// Apply global defaults to any provider missing them
+		// Apply sensible UI defaults to any provider missing them if needed
 		for i := range providers {
 			if providers[i].Model == "" {
-				providers[i].Model = model
+				providers[i].Model = "gpt-4o"
 			}
 			if providers[i].MaxMessages == 0 {
-				providers[i].MaxMessages = maxMessages
+				providers[i].MaxMessages = 200
 			}
 			if providers[i].ContextWindow == 0 {
-				providers[i].ContextWindow = contextWindow
+				providers[i].ContextWindow = 128000
 			}
 		}
 
@@ -1698,14 +1691,11 @@ func setupConfigRoutes(api fiber.Router) {
 			}
 		}
 
-		debugLog("GET /config/llm: providers=%d model=%s shell_access=%s", len(providers), model, shellAccess)
+		debugLog("GET /config/llm: providers=%d shell_access=%s", len(providers), shellAccess)
 		return c.JSON(fiber.Map{
-			"providers":      providers,
-			"model":          model,
-			"temperature":    temperature,
-			"max_messages":   maxMessages,
-			"context_window": contextWindow,
-			"shell_access":   shellAccess,
+			"providers":    providers,
+			"temperature":  temperature,
+			"shell_access": shellAccess,
 		})
 	})
 
@@ -1720,21 +1710,15 @@ func setupConfigRoutes(api fiber.Router) {
 			MaxMessages   int    `json:"max_messages"`
 		}
 		payload := new(struct {
-			Model         string        `json:"model"`
-			Providers     []provPayload `json:"providers"`
-			MaxMessages   int           `json:"max_messages"`
-			ContextWindow int           `json:"context_window"`
-			ShellAccess   string        `json:"shell_access"`
+			Providers   []provPayload `json:"providers"`
+			ShellAccess string        `json:"shell_access"`
 		})
 		c.BodyParser(payload)
-		debugLog("POST /config/llm: model=%s providers=%d max_messages=%d shell_access=%s", payload.Model, len(payload.Providers), payload.MaxMessages, payload.ShellAccess)
+		debugLog("POST /config/llm: providers=%d shell_access=%s", len(payload.Providers), payload.ShellAccess)
 
 		rawCfg := loadRawConfig()
 		if rawCfg == nil {
 			rawCfg = make(map[string]any)
-		}
-		if payload.Model != "" {
-			rawCfg["model"] = payload.Model
 		}
 
 		if len(payload.Providers) > 0 {
@@ -1742,10 +1726,10 @@ func setupConfigRoutes(api fiber.Router) {
 				rawCfg["provider"] = make(map[string]any)
 			}
 			provMap := rawCfg["provider"].(map[string]any)
-			
+
 			newProvMap := make(map[string]any)
 			var enabledProviders []string
-			
+
 			for i, p := range payload.Providers {
 				var newID string
 				if i == 0 {
@@ -1754,14 +1738,14 @@ func setupConfigRoutes(api fiber.Router) {
 					newID = fmt.Sprintf("fallback_%d", i)
 				}
 				enabledProviders = append(enabledProviders, newID)
-				
+
 				pCfg := make(map[string]any)
 				if existing, ok := provMap[p.ID].(map[string]any); ok && p.ID != "" {
 					for k, v := range existing {
 						pCfg[k] = v
 					}
 				}
-				
+
 				if p.APIKey != "" && !strings.HasSuffix(p.APIKey, "...") {
 					pCfg["api_key"] = p.APIKey
 					if i == 0 {
@@ -1787,21 +1771,15 @@ func setupConfigRoutes(api fiber.Router) {
 				} else {
 					delete(pCfg, "max_messages")
 				}
-				
+
 				newProvMap[newID] = pCfg
 			}
-			
+
 			rawCfg["provider"] = newProvMap
 
 			rawCfg["enabled_providers"] = enabledProviders
 		}
 
-		if payload.MaxMessages > 0 {
-			rawCfg["max_messages"] = payload.MaxMessages
-		}
-		if payload.ContextWindow > 0 {
-			rawCfg["context_window"] = payload.ContextWindow
-		}
 		if payload.ShellAccess != "" {
 			if _, ok := rawCfg["permission"].(map[string]any); !ok {
 				rawCfg["permission"] = make(map[string]any)
@@ -1850,6 +1828,14 @@ func setupConfigRoutes(api fiber.Router) {
 		return c.JSON(fiber.Map{"ok": true, "mode": mode, "agent": agentID})
 	})
 
+		api.Get("/config/embedding", func(c *fiber.Ctx) error {
+		cfg := loadCfg()
+		if cfg.Embedding != nil {
+			return c.JSON(cfg.Embedding)
+		}
+		return c.JSON(fiber.Map{})
+	})
+
 	api.Get("/config/mcp", func(c *fiber.Ctx) error {
 		cfg := loadCfg()
 		if cfg.Mcp != nil {
@@ -1858,17 +1844,42 @@ func setupConfigRoutes(api fiber.Router) {
 		return c.JSON(fiber.Map{"servers": map[string]any{}})
 	})
 
+		api.Post("/config/embedding", func(c *fiber.Ctx) error {
+		payload := new(config.EmbeddingConfig)
+		if err := c.BodyParser(payload); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
+		}
+
+		rawCfg := loadRawConfig()
+		if rawCfg == nil {
+			rawCfg = make(map[string]any)
+		}
+
+		rawCfg["embedding"] = map[string]any{
+			"enabled": payload.Enabled,
+			"base_url": payload.BaseURL,
+			"model": payload.Model,
+			"api_key": payload.APIKey,
+		}
+
+		saveRawConfig(rawCfg)
+		appCfg = loadCfg()
+
+		debugLog("POST /config/embedding: saved Embedding settings")
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
 	api.Post("/config/mcp", func(c *fiber.Ctx) error {
 		payload := new(config.McpConfig)
 		if err := c.BodyParser(payload); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
 		}
-		
+
 		rawCfg := loadRawConfig()
 		if rawCfg == nil {
 			rawCfg = make(map[string]any)
 		}
-		
+
 		if payload.Servers != nil {
 			rawCfg["mcp"] = map[string]any{
 				"servers": payload.Servers,
@@ -1876,10 +1887,10 @@ func setupConfigRoutes(api fiber.Router) {
 		} else {
 			delete(rawCfg, "mcp")
 		}
-		
+
 		saveRawConfig(rawCfg)
 		appCfg = loadCfg()
-		
+
 		// If engine is running, we might need to notify or restart MCP clients.
 		// For now, returning ok will prompt the UI to restart or they will be loaded on next run.
 		debugLog("POST /config/mcp: saved MCP settings")
@@ -1927,12 +1938,12 @@ func setupConfigRoutes(api fiber.Router) {
 		if err := c.BodyParser(payload); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
 		}
-		
+
 		rawCfg := loadRawConfig()
 		if rawCfg == nil {
 			rawCfg = make(map[string]any)
 		}
-		
+
 		rawCfg["compaction"] = map[string]any{
 			"auto":                   payload.Auto,
 			"tail_turns":             payload.TailTurns,
@@ -1941,10 +1952,10 @@ func setupConfigRoutes(api fiber.Router) {
 			"prune":                  payload.Prune,
 			"tool_truncation_limit":  payload.ToolTruncationLimit,
 		}
-		
+
 		saveRawConfig(rawCfg)
 		appCfg = loadCfg()
-		
+
 		debugLog("POST /config/compaction: saved Compaction settings")
 		return c.JSON(fiber.Map{"ok": true})
 	})
@@ -1974,10 +1985,10 @@ func setupProjectRoutes(api fiber.Router) {
 		if err != nil {
 			return c.JSON(fiber.Map{"error": err.Error(), "folders": []string{}})
 		}
-		
-		var available []string
+
+		available := make([]string, 0)
 		pr := loadProjectRegistry()
-		
+
 		for _, entry := range entries {
 			if entry.IsDir() {
 				isRegistered := false
@@ -2016,11 +2027,11 @@ func setupProjectRoutes(api fiber.Router) {
 			mcpManager.Workspace = targetFolder
 		}
 		initWorkspace(targetFolder)
-		
+
 		pr := loadProjectRegistry()
 		pr.LastActive = targetFolder
 		saveProjectRegistry(pr)
-		
+
 		activeSession = nil
 		project := registerProject(targetFolder)
 		loadLatestSession(targetFolder)
@@ -2043,23 +2054,23 @@ func setupProjectRoutes(api fiber.Router) {
 		if err := c.BodyParser(payload); err != nil || payload.Path == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Project path is required."})
 		}
-		
+
 		targetFolder, err := util.JailPath(util.GlobalWorkspacesRoot, filepath.Base(payload.Path))
 		if err != nil {
 			return c.Status(403).JSON(fiber.Map{"error": err.Error()})
 		}
-		
+
 		os.Setenv("WORKSPACE_DIR", targetFolder)
 		workspaceDir = targetFolder
 		if mcpManager != nil {
 			mcpManager.Workspace = targetFolder
 		}
 		initWorkspace(targetFolder)
-		
+
 		pr := loadProjectRegistry()
 		pr.LastActive = targetFolder
 		saveProjectRegistry(pr)
-		
+
 		activeSession = nil
 		// Load live events from disk
 		eventsMu.Lock()
@@ -2100,7 +2111,7 @@ func setupProjectRoutes(api fiber.Router) {
 		if err := c.BodyParser(payload); err != nil || payload.Path == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Project path is required."})
 		}
-		
+
 		// Remove it from the registry by its raw path so legacy projects can be removed.
 		warning := unregisterProject(payload.Path)
 
@@ -2117,7 +2128,7 @@ func setupProjectRoutes(api fiber.Router) {
 			liveEvents = nil
 			eventsMu.Unlock()
 		}
-		
+
 		return c.JSON(fiber.Map{"ok": true, "warning": warning, "session_log": []any{}})
 	})
 }
@@ -2129,7 +2140,7 @@ func setupWorkspaceRoutes(api fiber.Router) {
 		if w == "" || !dirExists(w) {
 			return c.JSON([]any{})
 		}
-		var results []map[string]any
+		results := make([]map[string]any, 0)
 		ignored := map[string]bool{
 			".git": true, "node_modules": true, ".venv": true, "venv": true,
 			"__pycache__": true, ".agent": true, ".pytest_cache": true,
@@ -2327,7 +2338,7 @@ func setupToolRoutes(api fiber.Router) {
 			{"value": "build", "type": "cmd", "label": "Build mode — implement directly"},
 		}
 		if q != "" {
-			var filtered []map[string]any
+			filtered := make([]map[string]any, 0)
 			for _, cmd := range commands {
 				if strings.Contains(strings.ToLower(cmd["value"].(string)), q) {
 					filtered = append(filtered, cmd)
@@ -2352,18 +2363,26 @@ func setupToolRoutes(api fiber.Router) {
 			}
 
 			globalModel := "gpt-4o"
-			if cfg.Model != nil {
-				globalModel = *cfg.Model
+			if p, ok := cfg.Provider["primary"]; ok && p.Model != nil {
+				globalModel = *p.Model
 			}
 
 			key := ""
-			if pc.APIKey != nil { key = *pc.APIKey }
+			if pc.APIKey != nil {
+				key = *pc.APIKey
+			}
 			base := ""
-			if pc.BaseURL != nil { base = *pc.BaseURL }
+			if pc.BaseURL != nil {
+				base = *pc.BaseURL
+			}
 			mdl := globalModel
-			if pc.Model != nil { mdl = *pc.Model }
+			if pc.Model != nil {
+				mdl = *pc.Model
+			}
 			dv := false
-			if pc.DisableVision != nil { dv = *pc.DisableVision }
+			if pc.DisableVision != nil {
+				dv = *pc.DisableVision
+			}
 
 			inst := buildProviderInstance(providerID, key, base, mdl, dv)
 			if inst == nil {
@@ -2425,15 +2444,14 @@ func setupMiscRoutes(api fiber.Router) {
 		if payload.Path == "" || w == "" {
 			return c.JSON(fiber.Map{"ok": false, "error": "File not found"})
 		}
-		if _, err := os.Stat(payload.Path); os.IsNotExist(err) {
+		fullPath, err := util.JailPath(w, payload.Path)
+		if err != nil {
+			return c.JSON(fiber.Map{"ok": false, "error": "Path outside workspace"})
+		}
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 			return c.JSON(fiber.Map{"ok": false, "error": "File not found"})
 		}
-		if isAbsPath(payload.Path, w) {
-			if !pathSafe(payload.Path, w) {
-				return c.JSON(fiber.Map{"ok": false, "error": "Path outside workspace"})
-			}
-		}
-		exec.Command("cmd", "/c", "start", "", payload.Path).Start()
+		exec.Command("cmd", "/c", "start", "", fullPath).Start()
 		return c.JSON(fiber.Map{"ok": true})
 	})
 
@@ -2496,10 +2514,10 @@ func setupStreamRoutes(api fiber.Router) {
 			Prompt string `json:"prompt"`
 		})
 		c.BodyParser(payload)
-		
+
 		activeSession.QueueFollowup(payload.Prompt)
 		activeSession.Save()
-		
+
 		return c.JSON(fiber.Map{"ok": true, "message": "Follow-up prompt queued!"})
 	})
 
@@ -2640,7 +2658,7 @@ func formatToolSummary(toolName, argsStr string) string {
 	return summary
 }
 func spawnSubagent(prompt, agentType, parentSessionID string) (string, error) {
-	newSessionID := fmt.Sprintf("sub-%d", time.Now().UnixNano())
+	newSessionID := fmt.Sprintf("sub-%d-%x", time.Now().UnixNano(), func() []byte { b := make([]byte, 4); rand.Read(b); return b }())
 
 	workspace := os.Getenv("WORKSPACE_DIR")
 	wm := util.NewWorktreeManager(workspace)
@@ -2693,13 +2711,13 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		if snapHash != "" && workspace != "" {
 			wsChanges = createArtifacts(workspace, snapHash, agentModifiedFiles)
 		}
-		
+
 		runMeta := map[string]any{
 			"live_events":       []map[string]any{},
 			"duration_ms":       durationMs,
 			"workspace_changes": wsChanges,
 		}
-		
+
 		for i := len(subSession.Messages) - 1; i >= 0; i-- {
 			if subSession.Messages[i].Role == "assistant" {
 				msg := &subSession.Messages[i]
@@ -2714,10 +2732,10 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 			}
 		}
 		subSession.Save()
-		
+
 		if parentSessionID != "" && subSession.Repo != nil {
 			parentMsg := session.Message{
-				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+				ID:        generateMsgID(),
 				SessionID: parentSessionID,
 				Role:      "user",
 				CreatedAt: time.Now().UnixMilli(),
@@ -2750,7 +2768,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 	}
 
 	userMsg := session.Message{
-		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+		ID:        generateMsgID(),
 		SessionID: subSession.SessionID,
 		Role:      "user",
 		CreatedAt: time.Now().UnixMilli(),
@@ -2785,7 +2803,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		pendingMsg := subSession.PopFollowup()
 		if pendingMsg != "" {
 			followup := session.Message{
-				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+				ID:        generateMsgID(),
 				SessionID: subSession.SessionID,
 				Role:      "user",
 				CreatedAt: time.Now().UnixMilli(),
@@ -2799,31 +2817,37 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		pm.SystemPrompt = pm.BuildSystemPrompt(agentID, schemas, workspace)
 
 		ctxWindow := 2000000
-		
+
+		var mName string
 		if len(appCfg.EnabledProviders) > 0 {
 			primaryID := appCfg.EnabledProviders[0]
-			if pCfg, ok := appCfg.Provider[primaryID]; ok && pCfg.ContextWindow != nil && *pCfg.ContextWindow > 0 {
-				ctxWindow = *pCfg.ContextWindow
+			if pCfg, ok := appCfg.Provider[primaryID]; ok {
+				if pCfg.ContextWindow != nil && *pCfg.ContextWindow > 0 {
+					ctxWindow = *pCfg.ContextWindow
+				}
+				if pCfg.Model != nil {
+					mName = *pCfg.Model
+				}
 			}
+		} else if p, ok := appCfg.Provider["primary"]; ok && p.Model != nil {
+			mName = *p.Model
 		}
-		
-		if ctxWindow == 2000000 && appCfg.ContextWindow != nil && *appCfg.ContextWindow > 0 {
-			ctxWindow = *appCfg.ContextWindow
-		} else if ctxWindow == 2000000 {
-			if mInfo, ok := provider.ResolveModel(*appCfg.Model); ok {
+
+		if ctxWindow == 2000000 && mName != "" {
+			if mInfo, ok := provider.ResolveModel(mName); ok {
 				ctxWindow = mInfo.Context
 			}
 		}
 
-		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {})
+		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {}, "")
 		oaMsgs := session.ToOpenAIMessages(history, false)
-		
+
 		toolDefs := buildOpenAIToolDefs(agentID)
 		streamCh, err := client.Stream(ctx, oaMsgs, toolDefs)
 		if err != nil {
 			debugLog("runSubEngine: cycle %d stream failed: %v", i, err)
 		}
-		
+
 		var cycleContent string
 		var toolCalls []provider.ToolCall
 
@@ -2852,7 +2876,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 
 		cycleContent = strings.TrimSpace(cycleContent)
 		astMsg := session.Message{
-			ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+			ID:        generateMsgID(),
 			SessionID: subSession.SessionID,
 			Role:      "assistant",
 			CreatedAt: time.Now().UnixMilli(),
@@ -2868,7 +2892,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 				Arguments:  tc.Arguments,
 			})
 		}
-		
+
 		if cycleContent == "" && len(toolCalls) == 0 && err != nil {
 			astMsg.Parts = append(astMsg.Parts, session.MessagePart{Type: "text", Content: "API error: " + err.Error()})
 		}
@@ -2883,14 +2907,14 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 
 		for _, tc := range toolCalls {
 			result := sp.ProcessToolCall(tc, subSession, agentID)
-			
+
 			resMsg := session.Message{
-				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+				ID:        generateMsgID(),
 				SessionID: subSession.SessionID,
 				Role:      "tool",
 				CreatedAt: time.Now().UnixMilli(),
 			}
-			
+
 			if result.Error != "" && result.Output == "" {
 				resMsg.Parts = append(resMsg.Parts, session.MessagePart{
 					Type:        "tool_result",
@@ -2945,7 +2969,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		liveSnap := make([]map[string]any, len(liveEvents))
 		copy(liveSnap, liveEvents)
 		eventsMu.Unlock()
-		var runEvents []map[string]any
+		runEvents := make([]map[string]any, 0)
 		for _, evt := range liveSnap {
 			typ, _ := evt["type"].(string)
 			if typ != "token" && typ != "complete" && typ != "done" && typ != "stopped" {
@@ -2989,6 +3013,11 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	if sessionRepo == nil {
 		sessionRepo = repo
 	}
+	
+	if workspace != "" {
+		wspkg.LoadWorkspaceEmbeddings(workspace, sessionRepo)
+	}
+	
 	sessionMu.Lock()
 	activeSession = session.NewSession(activeConversation, sessionRepo, agentID, configToDict(appCfg), workspace)
 	debugLog("runEngine: workspace=%s sessionID=%s", workspace, activeSession.SessionID)
@@ -3009,12 +3038,58 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 	}
 
+	// EXECUTION MEMORY: Extract episode from the previous turn before appending new prompt
+	if len(activeSession.Messages) > 0 {
+		var lastUserIdx int = -1
+		for i := len(activeSession.Messages) - 1; i >= 0; i-- {
+			if activeSession.Messages[i].Role == "user" {
+				lastUserIdx = i
+				break
+			}
+		}
+		
+		if lastUserIdx != -1 && lastUserIdx < len(activeSession.Messages)-1 {
+			// We have a completed turn (user -> assistant -> tool -> ...)
+			turnMessages := activeSession.Messages[lastUserIdx:]
+			
+			go func(ws string, repo *storage.Repository, msgs []session.Message, agentID string, cfg config.Config) {
+				// Only extract if there were actually tool calls
+				hasAction := false
+				for _, m := range msgs {
+					if m.Role == "assistant" {
+						for _, p := range m.Parts {
+							if p.Type == "tool_use" {
+								hasAction = true
+							}
+						}
+					}
+				}
+				
+				if hasAction && cfg.Embedding != nil && cfg.Embedding.Enabled {
+					client := clientFromCfg(cfg)
+					if client != nil {
+						episodeJSON, err := session.ExtractExecutionEpisode(context.Background(), msgs, client)
+						if err == nil && episodeJSON != "" {
+							episodeID := fmt.Sprintf("exec-%d-%x", time.Now().Unix(), func() []byte { b := make([]byte, 4); rand.Read(b); return b }())
+							wspkg.EmbedChunk(ws, "execution", episodeID, 0, episodeJSON, cfg.Embedding, repo)
+						}
+					}
+				}
+			}(workspace, activeSession.Repo, turnMessages, agentID, appCfg)
+		}
+	}
+
+	enrichedMessage := message
+	if ctxOrchestrator != nil {
+		enrichedMessage = ctxOrchestrator.EnrichUserPrompt(message, workspace)
+	}
+
 	userMsg := session.Message{
-		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+		ID:        generateMsgID(),
 		SessionID: activeSession.SessionID,
 		Role:      "user",
 		CreatedAt: time.Now().UnixMilli(),
-		Parts:     []session.MessagePart{{Type: "text", Content: message}},
+		Parts:     []session.MessagePart{{Type: "text", Content: enrichedMessage}},
 	}
 	if snapHash != "" {
 		userMsg.Metadata = map[string]any{"snapshot": snapHash}
@@ -3051,7 +3126,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 		if pendingMsg != "" {
 			followup := session.Message{
-				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+				ID:        generateMsgID(),
 				SessionID: activeSession.SessionID,
 				Role:      "user",
 				CreatedAt: time.Now().UnixMilli(),
@@ -3070,18 +3145,24 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		pm.SystemPrompt = sysPrompt
 
 		ctxWindow := 2000000
-		
+
+		var mName string
 		if len(appCfg.EnabledProviders) > 0 {
 			primaryID := appCfg.EnabledProviders[0]
-			if pCfg, ok := appCfg.Provider[primaryID]; ok && pCfg.ContextWindow != nil && *pCfg.ContextWindow > 0 {
-				ctxWindow = *pCfg.ContextWindow
+			if pCfg, ok := appCfg.Provider[primaryID]; ok {
+				if pCfg.ContextWindow != nil && *pCfg.ContextWindow > 0 {
+					ctxWindow = *pCfg.ContextWindow
+				}
+				if pCfg.Model != nil {
+					mName = *pCfg.Model
+				}
 			}
+		} else if p, ok := appCfg.Provider["primary"]; ok && p.Model != nil {
+			mName = *p.Model
 		}
-		
-		if ctxWindow == 2000000 && appCfg.ContextWindow != nil && *appCfg.ContextWindow > 0 {
-			ctxWindow = *appCfg.ContextWindow
-		} else if ctxWindow == 2000000 {
-			if mInfo, ok := provider.ResolveModel(*appCfg.Model); ok {
+
+		if ctxWindow == 2000000 && mName != "" {
+			if mInfo, ok := provider.ResolveModel(mName); ok {
 				ctxWindow = mInfo.Context
 			}
 		}
@@ -3092,7 +3173,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
 			addLiveEvent("activity", map[string]any{"event": state})
-		})
+		}, "")
 		oaMsgs := session.ToOpenAIMessages(history, false)
 		debugLog("runEngine: cycle %d prepared %d messages", i, len(oaMsgs))
 
@@ -3181,7 +3262,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				fullContent += "\n</think>\n"
 			}
 		}
-		
+
 		// Deduplicate proxy <think> mirroring
 		if strings.Count(cycleContent, "<think>") > 1 {
 			// If the proxy mirrored reasoning_content into content, we strip the second one
@@ -3230,7 +3311,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					}
 					history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
 						addLiveEvent("activity", map[string]any{"event": state})
-					})
+					}, "")
 					oaMsgs = session.ToOpenAIMessages(history, false)
 					debugLog("runEngine: cycle %d reduced ctxWindow to %d, retrying", i, ctxWindow)
 					goto retryCycle
@@ -3242,7 +3323,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 				// Append whatever we managed to stream/generate before the error
 				assistantMsg := session.Message{
-					ID:        fmt.Sprintf("msg-%d-err", time.Now().UnixNano()),
+					ID:        generateMsgID() + "-err",
 					SessionID: activeSession.SessionID,
 					Role:      "assistant",
 					CreatedAt: time.Now().UnixMilli(),
@@ -3275,17 +3356,17 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				cycleContent += "<think>\n" + resp.Reasoning + "\n</think>\n"
 			}
 			cycleContent += resp.Content
-			
+
 			// Deduplicate proxy <think> mirroring
 			if strings.Count(cycleContent, "<think>") > 1 {
 				cycleContent = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(cycleContent, "$1")
 			}
-			
+
 			// Fix DeepSeek R1 random <think> omissions
 			if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
 				cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
 			}
-			
+
 			fullContent += cycleContent
 			hasToolCall = len(resp.ToolCalls) > 0
 			debugLog("runEngine: cycle %d Generate() response: content=%d toolCalls=%d", i, len(cycleContent), len(resp.ToolCalls))
@@ -3306,7 +3387,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 
 		assistantMsg := session.Message{
-			ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+			ID:        generateMsgID(),
 			SessionID: activeSession.SessionID,
 			Role:      "assistant",
 			CreatedAt: time.Now().UnixMilli(),
@@ -3401,7 +3482,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			}
 
 			resultMsg := session.Message{
-				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+				ID:        generateMsgID(),
 				SessionID: activeSession.SessionID,
 				Role:      "tool",
 				CreatedAt: time.Now().UnixMilli(),
@@ -3451,8 +3532,6 @@ func debugLog(format string, args ...any) {
 		log.Printf("[DEBUG] "+format, args...)
 	}
 }
-
-
 
 func stopBackgroundProcesses() {
 	bgProcessesMu.Lock()
@@ -3518,10 +3597,10 @@ func getArtifactsForUI(workspace string) []map[string]any {
 	if _, err := os.Stat(artifactsDir); os.IsNotExist(err) {
 		return nil
 	}
-	var results []map[string]any
+	results := make([]map[string]any, 0)
 	entries, err := os.ReadDir(artifactsDir)
 	if err != nil {
-		return nil
+		return results
 	}
 	for _, f := range entries {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".md") {
@@ -3533,7 +3612,7 @@ func getArtifactsForUI(workspace string) []map[string]any {
 			continue
 		}
 		versionsDir := filepath.Join(artifactsDir, ".versions", f.Name())
-		var versions []map[string]any
+		versions := make([]map[string]any, 0)
 		if vEntries, err := os.ReadDir(versionsDir); err == nil {
 			for _, v := range vEntries {
 				if strings.HasSuffix(v.Name(), ".md") {
@@ -3726,7 +3805,7 @@ func ensureProjectInit() {
 			log.Printf("Warning: failed to create %s: %v", qfDir, err)
 			return
 		}
-		
+
 		configPath := filepath.Join(qfDir, "config.json")
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			defaultConfig := []byte(`{
@@ -3745,16 +3824,13 @@ func ensureProjectInit() {
     "auto": true,
     "preserve_recent_tokens": 4000,
     "prune": true,
-    "reserved": 4000,
-    "tail_turns": 3,
-    "tool_truncation_limit": 2000
+    "reserved": 2000,
+    "tail_turns": 5,
+    "tool_truncation_limit": 1000
   },
-  "context_window": 1000000,
   "default_agent": "build",
-  "disable_vision": true,
   "instructions": [],
   "intent_mode": "plan",
-  "max_messages": 200,
   "mcp": {
     "servers": {
       "playwright": {
@@ -3768,7 +3844,18 @@ func ensureProjectInit() {
       }
     }
   },
-  "model": "gpt-4o",
+  "provider": {
+    "primary": {
+      "model": "gpt-4o",
+      "disable_vision": true,
+      "context_window": 128000,
+      "max_messages": 200,
+      "base_url": "https://api.openai.com/v1"
+    }
+  },
+  "enabled_providers": [
+    "primary"
+  ],
   "permission": {
     "apply_patch": "allowed",
     "ast_search": "allowed",
@@ -3797,10 +3884,46 @@ func ensureProjectInit() {
 }`)
 			os.WriteFile(configPath, defaultConfig, 0644)
 		}
-		
+
 		wsDir := "workspace"
 		if _, err := os.Stat(wsDir); os.IsNotExist(err) {
 			os.MkdirAll(wsDir, 0755)
 		}
 	}
+}
+
+// recordDiagnostics parses shell output and saves it to the database
+func recordDiagnostics(repo *storage.Repository, workspace string, source string, output string) {
+	if workspace == "" {
+		return
+	}
+
+	lower := strings.ToLower(output)
+	if !strings.Contains(lower, "error") && !strings.Contains(output, "undefined") {
+		// Assume success, resolve active errors for this source
+		repo.DB.Conn.Exec("UPDATE workspace_diagnostics SET status = 'resolved' WHERE workspace = ? AND source = ?", workspace, source)
+		return
+	}
+
+	// Crude parse for undefined errors
+	var undefinedRegex = regexp.MustCompile(`undefined: ([A-Za-z0-9_]+)`)
+	matches := undefinedRegex.FindAllStringSubmatch(output, -1)
+	if len(matches) > 0 {
+		for _, match := range matches {
+			if len(match) > 1 {
+				symName := match[1]
+				id := fmt.Sprintf("%d", time.Now().UnixNano())
+				repo.DB.Conn.Exec(
+					"INSERT INTO workspace_diagnostics (id, workspace, path, symbol, source, status, severity, message, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					id, workspace, "unknown", symName, source, "active", "error", fmt.Sprintf("undefined: %s", symName), time.Now().Unix(),
+				)
+			}
+		}
+	}
+}
+
+func generateMsgID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return fmt.Sprintf("msg-%d-%x", time.Now().UnixNano(), b)
 }

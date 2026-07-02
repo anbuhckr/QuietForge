@@ -238,6 +238,10 @@
         <button type="button" id="openMcpModalBtn" class="diag-button" style="width: 100%;">Manage MCP Servers</button>
       </div>
       <div class="config-group">
+        <label class="config-label">Semantic Embeddings</label>
+        <button type="button" id="openEmbeddingBtn" class="diag-button" style="width: 100%;">Configure Semantic Search</button>
+      </div>
+      <div class="config-group">
         <label class="config-label" for="cfgShellAccess">Shell Access</label>
         <select id="cfgShellAccess" class="config-input">
           <option value="allow">Allowed (Default)</option>
@@ -250,6 +254,36 @@
 
     <div class="dialog-actions">
       <button id="settingsSave" class="diag-button">Save Configuration</button>
+    </div>
+  </div>
+</div>
+
+
+<div class="modal" id="embeddingModal">
+  <div class="dialog">
+    <button class="modal-close x" id="embeddingClose">×</button>
+    <h2>Semantic Embeddings</h2>
+    <div class="config-container">
+      <div class="config-group">
+        <label class="config-label" style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="cfgEmbeddingEnabled"> Enable Background Embeddings
+        </label>
+      </div>
+      <div class="config-group">
+        <label class="config-label">Base URL (e.g. http://localhost:11434/v1)</label>
+        <input type="text" id="cfgEmbeddingBaseURL" class="config-input" placeholder="Leave empty for OpenAI default">
+      </div>
+      <div class="config-group">
+        <label class="config-label">Model (e.g. nomic-embed-text)</label>
+        <input type="text" id="cfgEmbeddingModel" class="config-input" placeholder="Leave empty for text-embedding-3-small">
+      </div>
+      <div class="config-group">
+        <label class="config-label">API Key</label>
+        <input type="password" id="cfgEmbeddingAPIKey" class="config-input" placeholder="Optional for local models">
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button id="embeddingSave" class="diag-button">Save Embeddings</button>
     </div>
   </div>
 </div>

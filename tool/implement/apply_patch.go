@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"quietforge/tool"
 	"quietforge/util"
+	"strings"
 )
 
 type ApplyPatchTool struct{}
@@ -45,6 +45,10 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 		workspace, _ = os.Getwd()
 	}
 
+	if err := validateUnifiedPatchPaths(workspace, params.Patch); err != nil {
+		return &tool.ToolResult{Error: "access_denied", Output: err.Error()}, nil
+	}
+
 	patchFile := filepath.Join(workspace, ".quietforge_temp.patch")
 	if err := os.WriteFile(patchFile, []byte(params.Patch), 0644); err != nil {
 		return &tool.ToolResult{Error: "write_error", Output: fmt.Sprintf("Failed to write patch file: %v", err)}, nil
@@ -73,6 +77,72 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 		Error:  "patch_failed",
 		Output: fmt.Sprintf("Failed to apply patch.\nGit error: %s\nPatch error: %s", gitErr.String(), patchErr.String()),
 	}, nil
+}
+
+func validateUnifiedPatchPaths(workspace, patch string) error {
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimRight(line, "\r")
+		var paths []string
+
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			paths = append(paths, parseDiffGitPaths(strings.TrimSpace(strings.TrimPrefix(line, "diff --git ")))...)
+		case strings.HasPrefix(line, "--- "):
+			paths = append(paths, strings.TrimSpace(strings.TrimPrefix(line, "--- ")))
+		case strings.HasPrefix(line, "+++ "):
+			paths = append(paths, strings.TrimSpace(strings.TrimPrefix(line, "+++ ")))
+		case strings.HasPrefix(line, "rename from "):
+			paths = append(paths, strings.TrimSpace(strings.TrimPrefix(line, "rename from ")))
+		case strings.HasPrefix(line, "rename to "):
+			paths = append(paths, strings.TrimSpace(strings.TrimPrefix(line, "rename to ")))
+		case strings.HasPrefix(line, "copy from "):
+			paths = append(paths, strings.TrimSpace(strings.TrimPrefix(line, "copy from ")))
+		case strings.HasPrefix(line, "copy to "):
+			paths = append(paths, strings.TrimSpace(strings.TrimPrefix(line, "copy to ")))
+		}
+
+		for _, p := range paths {
+			if err := validateUnifiedPatchPath(workspace, p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func parseDiffGitPaths(raw string) []string {
+	fields := strings.Fields(raw)
+	if len(fields) < 2 {
+		return nil
+	}
+	return []string{fields[0], fields[1]}
+}
+
+func validateUnifiedPatchPath(workspace, rawPath string) error {
+	path := cleanUnifiedPatchPath(rawPath)
+	if path == "" || path == "/dev/null" {
+		return nil
+	}
+	if _, err := util.JailPath(workspace, path); err != nil {
+		return fmt.Errorf("patch path escapes workspace: %s", path)
+	}
+	return nil
+}
+
+func cleanUnifiedPatchPath(path string) string {
+	path = strings.TrimSpace(path)
+	if i := strings.IndexByte(path, '\t'); i >= 0 {
+		path = path[:i]
+	} else if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
+		if i := strings.IndexByte(path, ' '); i >= 0 {
+			path = path[:i]
+		}
+	}
+	path = strings.Trim(path, `"`)
+	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
+		path = path[2:]
+	}
+	return path
 }
 
 type SearchReplaceTool struct{}

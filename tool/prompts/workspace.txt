@@ -1,0 +1,15 @@
+The workspace tool is your interface to the QuietForge Knowledge Graph.
+The workspace Engine uses an AST Observer to silently parse all code in the background. It automatically tracks file exports, imports, and symbols deterministically!
+
+You should use this tool for:
+1. GRAPH QUERIES (Instant zero-latency lookup):
+   - `find_symbol`: Pass `symbol_name` to instantly locate where a function/struct/class is defined.
+   - `find_references`: Pass `path` to instantly find all files that import/depend on it.
+   - `get_dependencies`: Pass `path` to instantly list everything it imports.
+   
+   Note: For deep source-level semantic search across all code text (e.g. searching for a generic regex pattern or string), use `ast_search`. But for structural queries (finding exact function definitions or dependencies), ALWAYS use the `workspace` graph queries as they are instant.
+
+2. SEMANTIC MEMORY (LLM-driven):
+   - `list_files`: View all tracked files and their exports/purposes.
+   - `upsert_file`: Update the high-level semantic `purpose` of a file. (You do NOT need to do this when you edit a file, the Observer handles it. Only use this if you want to leave a custom semantic note).
+   - `list_architecture` / `add_architecture`: Track global design `decision`s or `constraint`s.

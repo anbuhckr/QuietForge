@@ -5,3 +5,5 @@ Edit existing files using exact string replacement.
 - If oldString appears multiple times, use replaceAll=true or add more context
 - Always read the file first to get the exact content
 - For complex multi-line changes, apply_patch is also available
+- IMPORTANT: After creating or significantly modifying a file, you MUST use the `workspace(upsert_file)` tool to update its purpose in the persistent project memory.
+- CRITICAL COST SAVINGS: When defining `oldString`, use the absolute MINIMUM number of lines needed to uniquely match (usually 1-3 lines). Do NOT output large blocks of unchanged code.

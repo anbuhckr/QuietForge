@@ -27,8 +27,9 @@ type Message struct {
 	SessionID string         `json:"session_id"`
 	Role      string         `json:"role"`
 	Parts     []MessagePart  `json:"parts"`
-	CreatedAt int64          `json:"created_at"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	CreatedAt    int64          `json:"created_at"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	CachedTokens int            `json:"-"`
 }
 
 func CompactMessages(ctx context.Context, messages []Message, config map[string]any, modelContext int, client *provider.Client, onProgress func(string)) []Message {
@@ -37,10 +38,11 @@ func CompactMessages(ctx context.Context, messages []Message, config map[string]
 	if !NeedsCompaction(totalTokens, usable) {
 		return messages
 	}
+	pruneTarget := GetPruneTarget(totalTokens, usable)
 	if client != nil {
-		return CompactWithLLM(ctx, messages, config, usable, client, onProgress)
+		return CompactWithLLM(ctx, messages, config, pruneTarget, client, onProgress)
 	}
-	return PruneMessages(messages, config, usable)
+	return PruneMessages(messages, config, pruneTarget)
 }
 
 func SerializeMessage(msg Message, truncationLimit int) string {
@@ -169,11 +171,35 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
 		return PruneMessages(messages, config, targetTokens)
 	}
 
+	// Stage 1: Try to fit the tail by compressing inner content.
+	// Stage 2: If it still doesn't fit, push older turns to the head for summarization.
+	var recent []Message
+	for tailStart < len(messages)-1 {
+		recent = compressMessages(messages[tailStart:], targetTokens-2000)
+		if EstimateTokens(recent) <= targetTokens-2000 {
+			break
+		}
+		
+		// If recent is still too big, push one more turn into the head to be summarized!
+		nextUser := tailStart + 1
+		for nextUser < len(messages) && messages[nextUser].Role != "user" {
+			nextUser++
+		}
+		if nextUser >= len(messages) {
+			break // Always keep at least the last user turn in the tail
+		}
+		tailStart = nextUser
+	}
+	
+	if recent == nil {
+		recent = compressMessages(messages[tailStart:], targetTokens-2000)
+	}
+
 	head := messages[:tailStart]
-	recent := messages[tailStart:]
 
 	var previousSummary string
 	headContextMsgs := make([]Message, 0)
+	updateCount := 0
 
 	for _, msg := range head {
 		isCompaction := false
@@ -181,6 +207,16 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
 		for _, part := range msg.Parts {
 			if part.Type == "compaction" {
 				previousSummary = part.Content
+				if msg.Metadata != nil {
+					switch v := msg.Metadata["update_count"].(type) {
+					case int:
+						updateCount = v
+					case int64:
+						updateCount = int(v)
+					case float64:
+						updateCount = int(v)
+					}
+				}
 				isCompaction = true
 				break
 			}
@@ -197,7 +233,7 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
 
 	var contexts []string
 	limit := GetToolTruncationLimit(config)
-	for _, msg := range head {
+	for _, msg := range headContextMsgs {
 		s := SerializeMessage(msg, limit)
 		if s != "" {
 			contexts = append(contexts, s)
@@ -215,13 +251,54 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
     "edited_files": ["Array of files modified"],
     "viewed_files": ["Array of files read"]
   },
+  "active_symbols": ["Array of important symbols/types/functions currently in context"],
+  "architecture": "String describing the current architectural state or boundaries",
+  "known_constraints": ["Array of constraints or edge cases discovered"],
+  "design_decisions": ["Array of choices made to resolve ambiguities"],
   "current_work_and_next_steps": "String detailing exactly what the agent was doing before compaction and what to do immediately next"
 }
 Do not include markdown formatting or any other text outside the JSON object.`
 
 	if previousSummary != "" {
-		promptText = fmt.Sprintf(
-			`Update the anchored summary below using the conversation history above.
+		summaryTokens := EstimateTokens([]Message{
+			{
+				Role: "user",
+				Parts: []MessagePart{
+					{
+						Type:    "compaction",
+						Content: previousSummary,
+					},
+				},
+			},
+		})
+		
+		if summaryTokens > GetSummaryReserve(config)/2 || updateCount >= 8 {
+			// Hard garbage collection trigger
+			promptText = fmt.Sprintf(
+				`The anchored summary below has grown too large or stale. You MUST perform a hard garbage collection.
+Treat the previous summary as potentially stale.
+Your goal is NOT to preserve information.
+Your goal is to reconstruct the smallest correct working memory needed to continue the current coding task.
+Anything that is completed, obsolete, duplicated, historical, or not immediately actionable should be removed.
+CRITICAL RULES FOR REWRITE:
+1. Drop ALL completed tasks, old 'work_accomplished', and stale 'files_and_code' that are no longer strictly necessary for the current immediate task.
+2. Keep ONLY the active architecture, unsolved constraints, and the most immediate next steps.
+3. Be absolutely ruthless in trimming fat.
+%s
+<previous-summary>
+%s
+</previous-summary>
+
+%s`,
+				jsonSchema,
+				previousSummary,
+				contextStr,
+			)
+			updateCount = 1 // Reset after GC
+		} else {
+			// Normal update
+			promptText = fmt.Sprintf(
+				`Update the anchored summary below using the conversation history above.
 Preserve still-true details, remove stale details, and merge in the new facts.
 %s
 <previous-summary>
@@ -229,10 +306,12 @@ Preserve still-true details, remove stale details, and merge in the new facts.
 </previous-summary>
 
 %s`,
-			jsonSchema,
-			previousSummary,
-			contextStr,
-		)
+				jsonSchema,
+				previousSummary,
+				contextStr,
+			)
+			updateCount++
+		}
 	} else {
 		promptText = fmt.Sprintf(
 			`Create a new anchored summary from the conversation history.
@@ -242,6 +321,7 @@ Preserve still-true details, remove stale details, and merge in the new facts.
 			jsonSchema,
 			contextStr,
 		)
+		updateCount = 1
 	}
 
 	compactionSystem := LoadPromptTemplate("compaction_system")
@@ -351,6 +431,9 @@ Preserve still-true details, remove stale details, and merge in the new facts.
 				Content: newSummaryStr,
 			},
 		},
+		Metadata: map[string]any{
+			"update_count": float64(updateCount),
+		},
 	}
 	turns := groupIntoTurns(head)
 	var protectedBlocks [][]Message
@@ -399,6 +482,10 @@ Preserve still-true details, remove stale details, and merge in the new facts.
 			seenMessageIDs[msg.ID] = struct{}{}
 			result = append(result, msg)
 		}
+	}
+
+	if EstimateTokens(result) > targetTokens {
+		return compressMessages(result, targetTokens)
 	}
 
 	return result
@@ -521,12 +608,18 @@ func PruneMessages(messages []Message, config map[string]any, targetTokens int) 
 		result = append([]Message(nil), messages[start:]...)
 	}
 
-	return result
+	return compressMessages(result, targetTokens)
 }
 
 func EstimateTokens(messages []Message) int {
 	total := 0
-	for _, msg := range messages {
+	for i := range messages {
+		msg := &messages[i]
+		if msg.CachedTokens > 0 {
+			total += msg.CachedTokens
+			continue
+		}
+
 		parts := make([]map[string]any, 0, len(msg.Parts))
 		for _, p := range msg.Parts {
 			parts = append(parts, map[string]any{
@@ -544,7 +637,13 @@ func EstimateTokens(messages []Message) int {
 		if err != nil {
 			continue
 		}
-		total += len(content) / 4
+		
+		tokens := len(content) / 4
+		if tokens == 0 {
+			tokens = 1 // Ensure >0 so we don't recalculate 0-token messages
+		}
+		msg.CachedTokens = tokens
+		total += tokens
 	}
 	return total
 }
@@ -609,3 +708,62 @@ func findTailStart(messages []Message, tailTurns int) int {
 	return tailStart
 }
 
+func compressMessages(recent []Message, budget int) []Message {
+	if EstimateTokens(recent) <= budget {
+		return recent
+	}
+
+	compressed := make([]Message, len(recent))
+	for i, msg := range recent {
+		compressed[i] = msg
+		compressed[i].Parts = make([]MessagePart, len(msg.Parts))
+		copy(compressed[i].Parts, msg.Parts)
+		// Reset cached tokens since we are modifying the parts
+		compressed[i].CachedTokens = 0
+	}
+
+	// Level 1: Truncate tool results to 8000 chars (approx 2000 tokens)
+	for i := range compressed {
+		for j := range compressed[i].Parts {
+			part := &compressed[i].Parts[j]
+			if part.Type == "tool_result" && len(part.Content) > 8000 {
+				part.Content = part.Content[:4000] + "\n\n[Tool output truncated (Level 1)]\n\n" + part.Content[len(part.Content)-4000:]
+			}
+		}
+	}
+	
+	if EstimateTokens(compressed) <= budget {
+		return compressed
+	}
+
+	// Level 2: Truncate tool results to 1000 chars and drop attachments
+	for i := range compressed {
+		for j := range compressed[i].Parts {
+			part := &compressed[i].Parts[j]
+			if part.Type == "tool_result" && len(part.Content) > 1000 {
+				part.Content = part.Content[:500] + "\n\n[Tool output truncated (Level 2)]\n\n" + part.Content[len(part.Content)-500:]
+			} else if part.Type == "file" {
+				part.Content = part.Content + " (Attachment stripped for context limits)"
+				part.Attachments = nil
+				part.Metadata = nil
+			}
+		}
+	}
+	
+	if EstimateTokens(compressed) <= budget {
+		return compressed
+	}
+
+	// Level 3: Replace completely with semantic string
+	for i := range compressed {
+		for j := range compressed[i].Parts {
+			part := &compressed[i].Parts[j]
+			if part.Type == "tool_result" {
+				originalSize := len(part.Content)
+				part.Content = fmt.Sprintf("[Tool output truncated completely to preserve context limits. Original size: %d bytes. Semantic summary unavailable.]", originalSize)
+			}
+		}
+	}
+
+	return compressed
+}

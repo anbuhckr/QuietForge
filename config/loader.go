@@ -53,10 +53,6 @@ func parseConfig(data map[string]any) Config {
 		Mode:              make(map[string]any),
 	}
 
-	if m, ok := data["model"].(string); ok {
-		cfg.Model = &m
-	}
-
 	agentsRaw, _ := data["agent"].(map[string]any)
 	if agentsRaw == nil {
 		agentsRaw = make(map[string]any)
@@ -311,9 +307,6 @@ func loadProjectConfig(startDir string) Config {
 
 func configToDict(cfg Config) map[string]any {
 	d := make(map[string]any)
-	if cfg.Model != nil {
-		d["model"] = *cfg.Model
-	}
 	if len(cfg.Provider) > 0 {
 		providers := make(map[string]any, len(cfg.Provider))
 		for k, v := range cfg.Provider {
@@ -331,10 +324,10 @@ func configToDict(cfg Config) map[string]any {
 				pd["disable_vision"] = *v.DisableVision
 			}
 			if v.ContextWindow != nil {
-				pd["context_window"] = *v.ContextWindow
+				pd["context_window"] = float64(*v.ContextWindow)
 			}
 			if v.MaxMessages != nil {
-				pd["max_messages"] = *v.MaxMessages
+				pd["max_messages"] = float64(*v.MaxMessages)
 			}
 			pd["options"] = v.Options
 			providers[k] = pd
@@ -342,9 +335,38 @@ func configToDict(cfg Config) map[string]any {
 		d["provider"] = providers
 	}
 	if len(cfg.Agent) > 0 {
-		agents := make(map[string]AgentConfig, len(cfg.Agent))
+		agents := make(map[string]any, len(cfg.Agent))
 		for k, v := range cfg.Agent {
-			agents[k] = v
+			ad := make(map[string]any)
+			if v.Description != nil {
+				ad["description"] = *v.Description
+			}
+			if v.Mode != nil {
+				ad["mode"] = *v.Mode
+			}
+			if v.Permission != nil {
+				ad["permission"] = v.Permission
+			}
+			if v.Model != nil {
+				ad["model"] = *v.Model
+			}
+			if v.Prompt != nil {
+				ad["prompt"] = *v.Prompt
+			}
+			if v.Temperature != nil {
+				ad["temperature"] = float64(*v.Temperature)
+			}
+			if v.TopP != nil {
+				ad["top_p"] = float64(*v.TopP)
+			}
+			ad["disable"] = v.Disable
+			if v.Hidden != nil {
+				ad["hidden"] = *v.Hidden
+			}
+			if v.Steps != nil {
+				ad["steps"] = float64(*v.Steps)
+			}
+			agents[k] = ad
 		}
 		d["agent"] = agents
 	}
@@ -413,10 +435,10 @@ func configToDict(cfg Config) map[string]any {
 		d["mcp"] = mcpMap
 	}
 	if cfg.Port != nil {
-		d["port"] = *cfg.Port
+		d["port"] = float64(*cfg.Port)
 	}
 	if cfg.SSLPort != nil {
-		d["ssl_port"] = *cfg.SSLPort
+		d["ssl_port"] = float64(*cfg.SSLPort)
 	}
 	return d
 }
