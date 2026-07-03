@@ -38,7 +38,14 @@ func CompactMessages(ctx context.Context, messages []Message, config map[string]
 	if !NeedsCompaction(totalTokens, usable) {
 		return messages
 	}
-	pruneTarget := GetPruneTarget(totalTokens, usable)
+	pruneTarget := GetPruneTarget(totalTokens, usable, config)
+	pruneEnabled := false
+	if p, ok := config["prune"].(bool); ok {
+		pruneEnabled = p
+	}
+	if pruneEnabled {
+		return PruneMessages(messages, config, pruneTarget)
+	}
 	if client != nil {
 		return CompactWithLLM(ctx, messages, config, pruneTarget, client, onProgress)
 	}
@@ -244,20 +251,16 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
 	var promptText string
 	jsonSchema := `CRITICAL: You MUST strictly output ONLY a valid JSON object with the following schema:
 {
-  "user_requests": ["Array of recent raw user prompts"],
-  "outstanding_requests": ["Array of tasks the user asked for that are not yet finished"],
-  "work_accomplished": ["Array of completed steps"],
+  "user_requests": ["Brief 1-line summaries of recent user requests/prompts"],
+  "outstanding_requests": ["1-3 brief tasks remaining to achieve the current goal"],
+  "work_accomplished": ["1-3 brief completed steps"],
   "files_and_code": {
-    "edited_files": ["Array of files modified"],
-    "viewed_files": ["Array of files read"]
+    "edited_files": ["Modified files"],
+    "viewed_files": ["Read files"]
   },
-  "active_symbols": ["Array of important symbols/types/functions currently in context"],
-  "architecture": "String describing the current architectural state or boundaries",
-  "known_constraints": ["Array of constraints or edge cases discovered"],
-  "design_decisions": ["Array of choices made to resolve ambiguities"],
-  "current_work_and_next_steps": "String detailing exactly what the agent was doing before compaction and what to do immediately next"
+  "current_work_and_next_steps": "A very brief, single-sentence summary of the current work and immediate next step."
 }
-Do not include markdown formatting or any other text outside the JSON object.`
+Keep all text descriptions and array items extremely concise and short. Do not include markdown formatting or any other text outside the JSON object.`
 
 	if previousSummary != "" {
 		summaryTokens := EstimateTokens([]Message{
@@ -277,13 +280,12 @@ Do not include markdown formatting or any other text outside the JSON object.`
 			promptText = fmt.Sprintf(
 				`The anchored summary below has grown too large or stale. You MUST perform a hard garbage collection.
 Treat the previous summary as potentially stale.
-Your goal is NOT to preserve information.
-Your goal is to reconstruct the smallest correct working memory needed to continue the current coding task.
-Anything that is completed, obsolete, duplicated, historical, or not immediately actionable should be removed.
+Your goal is NOT to preserve historical details. Reconstruct the absolute smallest working memory needed to continue.
 CRITICAL RULES FOR REWRITE:
-1. Drop ALL completed tasks, old 'work_accomplished', and stale 'files_and_code' that are no longer strictly necessary for the current immediate task.
-2. Keep ONLY the active architecture, unsolved constraints, and the most immediate next steps.
-3. Be absolutely ruthless in trimming fat.
+1. Keep the JSON summary extremely small. Keep descriptions to a single short line.
+2. Drop ALL completed tasks, old 'work_accomplished', and stale 'files_and_code' that are no longer strictly necessary.
+3. Keep ONLY the most active unresolved tasks and immediate next steps.
+4. Be absolutely ruthless in trimming fat.
 %s
 <previous-summary>
 %s
@@ -300,6 +302,7 @@ CRITICAL RULES FOR REWRITE:
 			promptText = fmt.Sprintf(
 				`Update the anchored summary below using the conversation history above.
 Preserve still-true details, remove stale details, and merge in the new facts.
+CRITICAL: Keep descriptions and tasks extremely short and concise (e.g. single-line bullet points) to save context window space.
 %s
 <previous-summary>
 %s
@@ -314,7 +317,7 @@ Preserve still-true details, remove stale details, and merge in the new facts.
 		}
 	} else {
 		promptText = fmt.Sprintf(
-			`Create a new anchored summary from the conversation history.
+			`Create a new anchored summary from the conversation history. Keep it extremely concise.
 %s
 
 %s`,
@@ -727,7 +730,7 @@ func compressMessages(recent []Message, budget int) []Message {
 		for j := range compressed[i].Parts {
 			part := &compressed[i].Parts[j]
 			if part.Type == "tool_result" && len(part.Content) > 8000 {
-				part.Content = part.Content[:4000] + "\n\n[Tool output truncated (Level 1)]\n\n" + part.Content[len(part.Content)-4000:]
+				part.Content = truncateToolResultSemantically(part.Content, 8000)
 			}
 		}
 	}
@@ -741,7 +744,7 @@ func compressMessages(recent []Message, budget int) []Message {
 		for j := range compressed[i].Parts {
 			part := &compressed[i].Parts[j]
 			if part.Type == "tool_result" && len(part.Content) > 1000 {
-				part.Content = part.Content[:500] + "\n\n[Tool output truncated (Level 2)]\n\n" + part.Content[len(part.Content)-500:]
+				part.Content = truncateToolResultSemantically(part.Content, 1000)
 			} else if part.Type == "file" {
 				part.Content = part.Content + " (Attachment stripped for context limits)"
 				part.Attachments = nil
@@ -766,4 +769,67 @@ func compressMessages(recent []Message, budget int) []Message {
 	}
 
 	return compressed
+}
+
+func truncateToolResultSemantically(content string, limit int) string {
+	if len(content) <= limit {
+		return content
+	}
+
+	// Check if JSON
+	trimmed := strings.TrimSpace(content)
+	if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) || (strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
+		halfLimit := limit / 2
+		if halfLimit > 400 {
+			halfLimit = 400
+		}
+		return content[:halfLimit] + "\n\n... [JSON data truncated to preserve context limits] ...\n\n" + content[len(content)-halfLimit:]
+	}
+
+	lines := strings.Split(content, "\n")
+	var errorLines []string
+	errorKeywords := []string{"error:", "fail", "failed", "panic:", "exception:", "undefined:", "err!", "exit status"}
+
+	for _, line := range lines {
+		lowerLine := strings.ToLower(line)
+		isError := false
+		for _, keyword := range errorKeywords {
+			if strings.Contains(lowerLine, keyword) {
+				isError = true
+				break
+			}
+		}
+		if isError {
+			errorLines = append(errorLines, line)
+			if len(errorLines) >= 15 {
+				break
+			}
+		}
+	}
+
+	if len(errorLines) > 0 {
+		var summary strings.Builder
+		summary.WriteString(fmt.Sprintf("\n[Tool output truncated to %d chars. Found error/failure indicators in output:]\n", limit))
+		for _, errLine := range errorLines {
+			summary.WriteString(errLine)
+			summary.WriteString("\n")
+		}
+		summary.WriteString("...\n[Final output tail:]\n")
+		lastLinesStart := len(lines) - 5
+		if lastLinesStart < 0 {
+			lastLinesStart = 0
+		}
+		for i := lastLinesStart; i < len(lines); i++ {
+			summary.WriteString(lines[i])
+			summary.WriteString("\n")
+		}
+		
+		res := summary.String()
+		if len(res) <= limit+500 {
+			return res
+		}
+	}
+
+	halfLimit := limit / 2
+	return content[:halfLimit] + fmt.Sprintf("\n\n[Tool output truncated to preserve context limits. Middle %d characters omitted.]\n\n", len(content)-limit) + content[len(content)-halfLimit:]
 }

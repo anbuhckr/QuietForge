@@ -1,9 +1,9 @@
 package main
 
 import (
-	"crypto/rand"
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"embed"
@@ -48,6 +48,7 @@ var (
 	activeSession      *session.Session
 	activeConversation string
 	engineRunning      bool
+	engineStartTime    int64
 	stopRequested      bool
 	engineCancel       context.CancelFunc
 	engineMu           sync.Mutex
@@ -699,7 +700,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.0.6")
+		fmt.Println("QuietForge v1.0.7")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1223,6 +1224,8 @@ func setupHealthRoutes(api fiber.Router) {
 
 		if !running {
 			resp["status"] = "idle"
+		} else {
+			resp["start_time"] = engineStartTime
 		}
 
 		if full {
@@ -1828,7 +1831,7 @@ func setupConfigRoutes(api fiber.Router) {
 		return c.JSON(fiber.Map{"ok": true, "mode": mode, "agent": agentID})
 	})
 
-		api.Get("/config/embedding", func(c *fiber.Ctx) error {
+	api.Get("/config/embedding", func(c *fiber.Ctx) error {
 		cfg := loadCfg()
 		if cfg.Embedding != nil {
 			return c.JSON(cfg.Embedding)
@@ -1844,7 +1847,7 @@ func setupConfigRoutes(api fiber.Router) {
 		return c.JSON(fiber.Map{"servers": map[string]any{}})
 	})
 
-		api.Post("/config/embedding", func(c *fiber.Ctx) error {
+	api.Post("/config/embedding", func(c *fiber.Ctx) error {
 		payload := new(config.EmbeddingConfig)
 		if err := c.BodyParser(payload); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
@@ -1856,10 +1859,10 @@ func setupConfigRoutes(api fiber.Router) {
 		}
 
 		rawCfg["embedding"] = map[string]any{
-			"enabled": payload.Enabled,
+			"enabled":  payload.Enabled,
 			"base_url": payload.BaseURL,
-			"model": payload.Model,
-			"api_key": payload.APIKey,
+			"model":    payload.Model,
+			"api_key":  payload.APIKey,
 		}
 
 		saveRawConfig(rawCfg)
@@ -2560,6 +2563,7 @@ func setupStreamRoutes(api fiber.Router) {
 
 		engineMu.Lock()
 		engineRunning = true
+		engineStartTime = time.Now().UnixMilli()
 		stopRequested = false
 		engineMu.Unlock()
 
@@ -2580,6 +2584,7 @@ func setupStreamRoutes(api fiber.Router) {
 		if engineRunning && engineCancel != nil {
 			engineCancel()
 			engineRunning = false
+			engineStartTime = 0
 			debugLog("/stop: engine cancelled, engineRunning=false")
 		}
 		return c.JSON(fiber.Map{"ok": true})
@@ -2950,6 +2955,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 		engineMu.Lock()
 		engineRunning = false
+		engineStartTime = 0
 		engineMu.Unlock()
 		debugLog("runEngine: engineRunning set to false")
 	}()
@@ -3013,11 +3019,11 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	if sessionRepo == nil {
 		sessionRepo = repo
 	}
-	
+
 	if workspace != "" {
 		wspkg.LoadWorkspaceEmbeddings(workspace, sessionRepo)
 	}
-	
+
 	sessionMu.Lock()
 	activeSession = session.NewSession(activeConversation, sessionRepo, agentID, configToDict(appCfg), workspace)
 	debugLog("runEngine: workspace=%s sessionID=%s", workspace, activeSession.SessionID)
@@ -3047,11 +3053,11 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				break
 			}
 		}
-		
+
 		if lastUserIdx != -1 && lastUserIdx < len(activeSession.Messages)-1 {
 			// We have a completed turn (user -> assistant -> tool -> ...)
 			turnMessages := activeSession.Messages[lastUserIdx:]
-			
+
 			go func(ws string, repo *storage.Repository, msgs []session.Message, agentID string, cfg config.Config) {
 				// Only extract if there were actually tool calls
 				hasAction := false
@@ -3064,7 +3070,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 						}
 					}
 				}
-				
+
 				if hasAction && cfg.Embedding != nil && cfg.Embedding.Enabled {
 					client := clientFromCfg(cfg)
 					if client != nil {

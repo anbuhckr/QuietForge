@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -74,11 +75,48 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 		compactCfg = cc
 	}
 
-	if enabled, ok := compactCfg["enabled"].(bool); !ok || enabled {
-		history = CompactMessages(ctx, history, compactCfg, modelContext, client, onProgress)
+	autoCompaction := true
+	if a, ok := compactCfg["auto"].(bool); ok {
+		autoCompaction = a
+	} else if enabled, ok := compactCfg["enabled"].(bool); ok {
+		autoCompaction = enabled
 	}
 
-	finalSystemPrompt := pm.SystemPrompt
+	if autoCompaction {
+		compacted := CompactMessages(ctx, history, compactCfg, modelContext, client, onProgress)
+		if len(compacted) < len(history) {
+			pm.Session.ReplaceMessages(compacted)
+			history = compacted
+		}
+	}
+
+	todoStatus := ""
+	if pm.Session != nil && pm.Session.Repo != nil {
+		if todos, err := pm.Session.Repo.ListTodos(pm.Session.SessionID); err == nil && len(todos) > 0 {
+			var lines []string
+			for _, t := range todos {
+				marker := "[ ]"
+				switch t.Status {
+				case "pending":
+					marker = "[ ]"
+				case "in_progress":
+					marker = "[~]"
+				case "completed":
+					marker = "[x]"
+				case "cancelled":
+					marker = "[-]"
+				}
+				shortID := t.ID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				lines = append(lines, fmt.Sprintf("%s %s: %s", marker, shortID, t.Content))
+			}
+			todoStatus = "\n\n# Active Tasks / Todo List\n" + strings.Join(lines, "\n")
+		}
+	}
+
+	finalSystemPrompt := pm.SystemPrompt + todoStatus
 	if dynamicContext != "" {
 		finalSystemPrompt = finalSystemPrompt + "\n\n# Dynamic Turn Context\n" + dynamicContext
 	}

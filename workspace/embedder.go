@@ -186,7 +186,7 @@ func processBatch(chunks []Chunk, cfg *config.EmbeddingConfig, repo *storage.Rep
 		
 		embBlob, _ := json.Marshal(data.Embedding)
 		
-		id := fmt.Sprintf("%s_%s_%d", c.Kind, c.ObjectID, c.ChunkIndex)
+		id := fmt.Sprintf("%s_%s_%s_%d", c.Workspace, c.Kind, c.ObjectID, c.ChunkIndex)
 		
 		repo.DB.Conn.Exec(`
 			INSERT INTO workspace_embeddings (id, workspace, kind, object_id, chunk_index, model, dimension, hash, embedding, updated_at)

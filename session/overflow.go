@@ -14,12 +14,22 @@ func GetUsableContextWindow(modelContext int, config map[string]any) int {
 	}
 
 	reserved := DefaultReservedBuffer
+	hasConfigReserved := false
 	if config != nil {
 		if r, ok := config["reserved"].(float64); ok && r > 0 {
 			reserved = int(r)
+			hasConfigReserved = true
 		} else if r, ok := config["reserved"].(int); ok && r > 0 {
 			reserved = r
+			hasConfigReserved = true
 		}
+	}
+
+	if !hasConfigReserved && reserved >= context {
+		reserved = context / 4
+	}
+	if reserved >= context {
+		reserved = context / 2
 	}
 
 	return context - reserved
@@ -51,11 +61,30 @@ func NeedsCompaction(totalTokens int, usableTokens int) bool {
 	return totalTokens > usableTokens
 }
 
-func GetPruneTarget(totalTokens int, usableTokens int) int {
-	// Give a 30% runway so compaction doesn't trigger repeatedly every few turns
-	target := int(float64(usableTokens) * 0.7)
-	if target < PruneMinimum {
-		return PruneMinimum
+func GetPruneTarget(totalTokens int, usableTokens int, config map[string]any) int {
+	// If preserve_recent_tokens is configured and valid, use it directly as the target
+	if config != nil {
+		if p, ok := config["preserve_recent_tokens"].(float64); ok && p > 0 {
+			target := int(p)
+			if target < usableTokens {
+				return target
+			}
+		} else if p, ok := config["preserve_recent_tokens"].(int); ok && p > 0 {
+			target := p
+			if target < usableTokens {
+				return target
+			}
+		}
+	}
+
+	// Default to keeping only 30% of the usable context window (leaving 70% headroom)
+	target := int(float64(usableTokens) * 0.3)
+	minTarget := PruneMinimum
+	if minTarget >= usableTokens {
+		minTarget = int(float64(usableTokens) * 0.3)
+	}
+	if target < minTarget {
+		return minTarget
 	}
 	return target
 }

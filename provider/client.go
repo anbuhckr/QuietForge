@@ -130,11 +130,12 @@ func (c *Client) Generate(ctx context.Context, messages []openai.ChatCompletionM
 			req.Messages = messages
 		}
 
+		maxTokensReduced := false
 		for retries := 0; ; retries++ {
 			resp, err = instance.Client.CreateChatCompletion(ctx, req)
 			if err == nil {
 				c.mu.Lock()
-				if req.MaxTokens > 0 {
+				if req.MaxTokens > 0 && !maxTokensReduced {
 					c.knownMaxTokens = req.MaxTokens
 				}
 				c.SuccessfulProviderID = instance.ID
@@ -165,6 +166,7 @@ func (c *Client) Generate(ctx context.Context, messages []openai.ChatCompletionM
 			}
 			
 			if strings.Contains(errStr, "422") || strings.Contains(errStr, "max_tokens") {
+				maxTokensReduced = true
 				if req.MaxTokens == 0 {
 					req.MaxTokens = maxTokensLimit
 				} else {
@@ -283,11 +285,12 @@ func (c *Client) Stream(ctx context.Context, messages []openai.ChatCompletionMes
 			req.Messages = messages
 		}
 
+		maxTokensReduced := false
 		for retries := 0; ; retries++ {
 			stream, err = instance.Client.CreateChatCompletionStream(ctx, req)
 			if err == nil {
 				c.mu.Lock()
-				if req.MaxTokens > 0 {
+				if req.MaxTokens > 0 && !maxTokensReduced {
 					c.knownMaxTokens = req.MaxTokens
 				}
 				c.SuccessfulProviderID = instance.ID
@@ -318,6 +321,7 @@ func (c *Client) Stream(ctx context.Context, messages []openai.ChatCompletionMes
 			}
 			
 			if strings.Contains(errStr, "422") || strings.Contains(errStr, "max_tokens") {
+				maxTokensReduced = true
 				if req.MaxTokens == 0 {
 					req.MaxTokens = maxTokensLimit
 				} else {

@@ -151,6 +151,16 @@ func (t *GrepTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 	if matches == nil {
 		matches = []GrepMatch{}
 	}
+
+	totalMatches := len(matches)
+	if totalMatches > 50 {
+		matches = matches[:50]
+		matches = append(matches, GrepMatch{
+			File:    "[Truncated]",
+			Line:    0,
+			Content: fmt.Sprintf("[Grep output truncated. Found %d matches, showing first 50. Use a more specific pattern to refine results.]", totalMatches),
+		})
+	}
 	
 	b, _ := json.Marshal(matches)
 

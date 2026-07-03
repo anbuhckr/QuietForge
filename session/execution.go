@@ -47,7 +47,7 @@ Schema:
 }
 
 Execution Trace:
-%%s`, contextStr)
+%s`, contextStr)
 
 	req := openai.ChatCompletionRequest{
 		Model: client.Model,

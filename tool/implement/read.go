@@ -93,6 +93,16 @@ func (t *ReadTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		if list == nil {
 			list = []DirEntry{}
 		}
+
+		if len(list) > 150 {
+			originalLength := len(list)
+			list = list[:150]
+			list = append(list, DirEntry{
+				Name:      fmt.Sprintf("[Truncated: showing 150 of %d entries. Use a more specific path to view nested files.]", originalLength),
+				IsDir:     false,
+				SizeBytes: 0,
+			})
+		}
 		
 		b, _ := json.Marshal(list)
 		return &tool.ToolResult{

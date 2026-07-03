@@ -2,6 +2,7 @@ package implement
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"quietforge/tool"
 	"quietforge/util"
 	"strings"
+	"time"
 )
 
 type ApplyPatchTool struct{}
@@ -55,8 +57,11 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 	}
 	defer os.Remove(patchFile)
 
+	execCtx, execCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer execCancel()
+
 	var gitOut, gitErr bytes.Buffer
-	gitCmd := exec.Command("git", "apply", ".quietforge_temp.patch")
+	gitCmd := exec.CommandContext(execCtx, "git", "apply", ".quietforge_temp.patch")
 	gitCmd.Dir = workspace
 	gitCmd.Stdout = &gitOut
 	gitCmd.Stderr = &gitErr
@@ -65,7 +70,7 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 	}
 
 	var patchOut, patchErr bytes.Buffer
-	patchCmd := exec.Command("patch", "-p1", "-i", ".quietforge_temp.patch")
+	patchCmd := exec.CommandContext(execCtx, "patch", "-p1", "-i", ".quietforge_temp.patch")
 	patchCmd.Dir = workspace
 	patchCmd.Stdout = &patchOut
 	patchCmd.Stderr = &patchErr
@@ -203,12 +208,21 @@ func (t *SearchReplaceTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.T
 		}
 
 		content := string(contentBytes)
-		if !strings.Contains(content, p.Search) {
+		hasCRLF := strings.Contains(content, "\r\n")
+		normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
+		normalizedSearch := strings.ReplaceAll(p.Search, "\r\n", "\n")
+		normalizedReplace := strings.ReplaceAll(p.Replace, "\r\n", "\n")
+
+		if !strings.Contains(normalizedContent, normalizedSearch) {
 			results = append(results, fmt.Sprintf("Block %d: SEARCH text not found in %s", i, p.FilePath))
 			continue
 		}
 
-		newContent := strings.Replace(content, p.Search, p.Replace, 1)
+		newContent := strings.Replace(normalizedContent, normalizedSearch, normalizedReplace, 1)
+		if hasCRLF {
+			newContent = strings.ReplaceAll(newContent, "\n", "\r\n")
+		}
+
 		if err := os.WriteFile(pathStr, []byte(newContent), 0644); err != nil {
 			results = append(results, fmt.Sprintf("Block %d: Failed to write %s: %v", i, p.FilePath, err))
 			continue

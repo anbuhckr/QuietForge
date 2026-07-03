@@ -424,12 +424,17 @@ class ConversationState {
           parts.forEach(p => {
             if (p.type === 'text') {
               let textContent = p.content;
+              let thinkText = "";
               const thinkMatch = /<think>([\s\S]*?)<\/think>/.exec(textContent);
               if (thinkMatch) {
-                  textContent = thinkMatch[1].trim();
+                  thinkText = thinkMatch[1].trim();
+                  textContent = textContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
               }
-              if (!/\[Thought process omitted/i.test(textContent)) {
-                  think = (think || '') + textContent;
+              if (thinkText && !/\[Thought process omitted/i.test(thinkText)) {
+                  think = (think || '') + thinkText;
+              }
+              if (textContent) {
+                  turn.agent = (turn.agent || '') + textContent;
               }
             } else if (p.type === 'tool_use') {
               try {
@@ -496,6 +501,7 @@ class ConversationState {
     } else if (kind === 'done' || kind === 'complete') {
       turn.completed = true;
       if (evt.duration_ms) turn.durationMs = evt.duration_ms;
+      if (evt.workspace_changes) turn.workspaceChanges = evt.workspace_changes;
     }
 
     requestAnimationFrame(() => {
@@ -829,7 +835,7 @@ function updateSendStopButtons() {
   }
 }
 
-function setRunningState(isRunning, isStopping = false) {
+function setRunningState(isRunning, isStopping = false, backendStartTime = 0) {
   if (isRunning && !running) { window._newDiffArtifacts = []; _notifQueued = false; }
   running = isRunning;
   stopping = isStopping;
@@ -839,12 +845,14 @@ function setRunningState(isRunning, isStopping = false) {
   updateSendStopButtons();
   if (isStopping) updateInlineLive('Stopping', 'stopping');
   if (isRunning && !isStopping) {
-    if (!runStartTime) {
-      runStartTime = Date.now()
+    if (backendStartTime > 0) {
+      runStartTime = backendStartTime;
+    } else if (!runStartTime) {
+      runStartTime = Date.now();
     }
     if (!runTimerInterval) {
       runTimerInterval = setInterval(updateTimer, 1000);
-      updateTimer()
+      updateTimer();
     }
   } else if (!isRunning) {
     const elapsedMs = runStartTime ? Date.now() - runStartTime : 0;
@@ -1050,7 +1058,7 @@ async function refresh() {
     $('workSub').textContent = projectSelected ? (a.workspace || '') : 'No workspace active.';
     _updateTokenDisplay();
     renderBackendDiagnostics(a.backend_diagnostics || {});
-    setRunningState(!!a.running, !!a.stop_requested);
+    setRunningState(!!a.running, !!a.stop_requested, a.start_time);
     if (a.artifacts !== undefined) window.latestArtifacts = a.artifacts;
     
     // Auth logic for Logout button
@@ -1276,10 +1284,14 @@ function handleAgentEvent(d, isHistory = false) {
      _notifQueued = true;
      if (!isHistory) _playNotificationSound();
      
-     if (d.response) {
-         conversationState.addLiveEvent({ type: 'token', text: d.response });
-     }
-     conversationState.addLiveEvent({ type: 'done' });
+      if (d.response) {
+          conversationState.addLiveEvent({ type: 'token', text: d.response });
+      }
+      conversationState.addLiveEvent({ 
+          type: 'done', 
+          duration_ms: d.duration_ms, 
+          workspace_changes: d.workspace_changes 
+      });
      
      if (sseSource) {
        sseSource.close();
@@ -1289,7 +1301,11 @@ function handleAgentEvent(d, isHistory = false) {
      poll = null;
      setRunningState(false, false);
      firstStatus = true;
-     if (!isHistory) refresh();
+      if (!isHistory) {
+        refresh().then(() => {
+          conversationState.render();
+        });
+      }
      return;
   }
   

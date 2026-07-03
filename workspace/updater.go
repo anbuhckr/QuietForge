@@ -50,7 +50,7 @@ func UpdateFile(repo *storage.Repository, workspace, path string) error {
 		if end > len(lines) { end = len(lines) }
 		if start < end {
 			chunkContent := strings.Join(lines[start:end], "\n")
-			EmbedChunk(workspace, "symbol", sym.Name, i, chunkContent, cfg.Embedding, repo)
+			EmbedChunk(workspace, "symbol", path+":"+sym.Name, i, chunkContent, cfg.Embedding, repo)
 		}
 	}
 
