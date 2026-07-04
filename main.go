@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -700,7 +701,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.0.7")
+		fmt.Println("QuietForge v1.0.8")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1894,11 +1895,10 @@ func setupConfigRoutes(api fiber.Router) {
 		saveRawConfig(rawCfg)
 		appCfg = loadCfg()
 
-		// If engine is running, we might need to notify or restart MCP clients.
-		// For now, returning ok will prompt the UI to restart or they will be loaded on next run.
+		// MCP config is now plug & play — servers restart immediately regardless of engine state.
 		debugLog("POST /config/mcp: saved MCP settings")
 
-		if isEngineRunning() && mcpManager != nil {
+		if mcpManager != nil {
 			var mcpServers []tool.McpServerDef
 			if payload.Servers != nil {
 				for name, sc := range payload.Servers {
@@ -2312,6 +2312,91 @@ func setupWorkspaceRoutes(api fiber.Router) {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"success": true})
+	})
+
+	// Flat directory listing for explorer
+	api.Get("/workspace/list", func(c *fiber.Ctx) error {
+		path := c.Query("path", "")
+		w := workspaceDir
+		if w == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "No workspace"})
+		}
+		dirPath := filepath.Join(w, path)
+		if !pathSafe(dirPath, w) {
+			return c.Status(403).JSON(fiber.Map{"error": "Access denied"})
+		}
+		if !dirExists(dirPath) {
+			return c.JSON([]any{})
+		}
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		ignored := map[string]bool{
+			".git": true, "node_modules": true, ".venv": true, "venv": true,
+			"__pycache__": true, ".agent": true, ".pytest_cache": true,
+			".opencode": true, "target": true, "build": true, "dist": true,
+			".next": true, ".idea": true,
+		}
+		var results []map[string]any
+		for _, entry := range entries {
+			if ignored[entry.Name()] || strings.HasPrefix(entry.Name(), ".") {
+				if entry.Name() != ".env" && entry.Name() != ".agents" && entry.Name() != ".github" {
+					continue
+				}
+			}
+			if entry.Name() == ".DS_Store" || entry.Name() == "Thumbs.db" || entry.Name() == ".gitignore" {
+				continue
+			}
+			relPath, _ := filepath.Rel(w, filepath.Join(dirPath, entry.Name()))
+			relPath = strings.ReplaceAll(relPath, "\\", "/")
+			results = append(results, map[string]any{
+				"name": entry.Name(),
+				"type": func() string { if entry.IsDir() { return "dir" } else { return "file" } }(),
+				"path": relPath,
+			})
+		}
+		sort.Slice(results, func(i, j int) bool {
+			ri, rj := results[i], results[j]
+			if ri["type"] != rj["type"] {
+				return ri["type"].(string) == "dir"
+			}
+			return strings.ToLower(ri["name"].(string)) < strings.ToLower(rj["name"].(string))
+		})
+		return c.JSON(results)
+	})
+
+	// Copy file or directory
+	api.Post("/workspace/copy", func(c *fiber.Ctx) error {
+		var payload struct {
+			Src  string `json:"src"`
+			Dest string `json:"dest"`
+		}
+		if err := c.BodyParser(&payload); err != nil || payload.Src == "" || payload.Dest == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
+		}
+		w := workspaceDir
+		if w == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "No workspace"})
+		}
+		srcPath := filepath.Join(w, payload.Src)
+		destPath := filepath.Join(w, payload.Dest)
+		if !pathSafe(srcPath, w) || !pathSafe(destPath, w) {
+			return c.Status(403).JSON(fiber.Map{"error": "Access denied"})
+		}
+		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+			return c.Status(404).JSON(fiber.Map{"error": "Source not found"})
+		}
+		// If dest already exists, generate unique name
+		if _, err := os.Stat(destPath); err == nil {
+			destPath = generateUniqueCopyPath(destPath)
+		}
+		if err := copyPath(srcPath, destPath); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		relDest, _ := filepath.Rel(w, destPath)
+		relDest = strings.ReplaceAll(relDest, "\\", "/")
+		return c.JSON(fiber.Map{"ok": true, "path": relDest})
 	})
 
 	api.Post("/tool/approve", func(c *fiber.Ctx) error {
@@ -3932,4 +4017,76 @@ func generateMsgID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return fmt.Sprintf("msg-%d-%x", time.Now().UnixNano(), b)
+}
+
+func generateUniqueCopyPath(dest string) string {
+	orig := dest
+	for i := 1; i < 1000; i++ {
+		ext := filepath.Ext(orig)
+		base := strings.TrimSuffix(filepath.Base(orig), ext)
+		dir := filepath.Dir(orig)
+		candidate := filepath.Join(dir, fmt.Sprintf("%s - Copy%s", base, ext))
+		if i > 1 {
+			candidate = filepath.Join(dir, fmt.Sprintf("%s - Copy (%d)%s", base, i, ext))
+		}
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+	return orig + ".copy"
+}
+
+func copyPath(src, dest string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return copyDir(src, dest)
+	}
+	return copyFile(src, dest)
+}
+
+func copyFile(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	info, _ := os.Stat(src)
+	if info != nil {
+		os.Chmod(dest, info.Mode())
+	}
+	return nil
+}
+
+func copyDir(src, dest string) error {
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		destPath := filepath.Join(dest, entry.Name())
+		if err := copyPath(srcPath, destPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }

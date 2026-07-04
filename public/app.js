@@ -855,6 +855,10 @@ function setRunningState(isRunning, isStopping = false, backendStartTime = 0) {
       updateTimer();
     }
   } else if (!isRunning) {
+    if (!running) {
+      // Already not running; prevent overwriting duration with stale 0ms
+      return;
+    }
     const elapsedMs = runStartTime ? Date.now() - runStartTime : 0;
     clearInterval(runTimerInterval);
     runTimerInterval = null;
@@ -2642,13 +2646,21 @@ document.addEventListener('click', e => {
   }
 });
 
-// --- Workspace File Explorer Logic ---
+// --- Workspace File Explorer Logic (flat list, Windows Explorer style) ---
 const tabWorkspaces = document.getElementById('tabWorkspaces');
 const tabExplorer = document.getElementById('tabExplorer');
 const explorerTree = document.getElementById('explorerTree');
 const workspaceActions = document.getElementById('workspaceActions');
 const explorerActions = document.getElementById('explorerActions');
+const explorerActionsBottom = document.getElementById('explorerActionsBottom');
 const btnRefreshExplorer = document.getElementById('refreshExplorer');
+const explorerListEl = document.getElementById('explorerList');
+const explorerBreadcrumbEl = document.getElementById('explorerBreadcrumb');
+const explorerBackBtn = document.getElementById('explorerBack');
+
+let explorerPath = '';
+let explorerSelection = '';
+let clipboard = { action: null, srcPath: '' };
 
 if (tabWorkspaces && tabExplorer) {
   tabWorkspaces.addEventListener('click', () => {
@@ -2658,6 +2670,7 @@ if (tabWorkspaces && tabExplorer) {
     if (explorerTree) explorerTree.style.display = 'none';
     if (workspaceActions) workspaceActions.style.display = 'flex';
     if (explorerActions) explorerActions.style.display = 'none';
+    if (explorerActionsBottom) explorerActionsBottom.style.display = 'none';
   });
 
   tabExplorer.addEventListener('click', () => {
@@ -2667,96 +2680,124 @@ if (tabWorkspaces && tabExplorer) {
     if (explorerTree) explorerTree.style.display = 'block';
     if (workspaceActions) workspaceActions.style.display = 'none';
     if (explorerActions) explorerActions.style.display = 'flex';
-    loadExplorerTree();
+    if (explorerActionsBottom) explorerActionsBottom.style.display = 'flex';
+    loadExplorerList('');
   });
 }
 
 if (btnRefreshExplorer) {
   btnRefreshExplorer.addEventListener('click', (e) => {
-    if (tabExplorer && tabExplorer.classList.contains('active')) {
-      e.preventDefault();
-      e.stopPropagation();
-      loadExplorerTree();
-    }
+    e.preventDefault();
+    e.stopPropagation();
+    loadExplorerList(explorerPath);
   });
 }
 
-async function loadExplorerTree() {
-  if (!explorerTree) return;
-  explorerTree.innerHTML = '<div style="color:var(--text-muted); padding:10px;">Loading...</div>';
+if (explorerBackBtn) {
+  explorerBackBtn.addEventListener('click', () => {
+    if (!explorerPath) return;
+    const parts = explorerPath.split('/').filter(Boolean);
+    parts.pop();
+    const parentPath = parts.join('/');
+    navigateExplorer(parentPath);
+  });
+}
+
+async function loadExplorerList(path) {
+  if (!explorerListEl) return;
+  explorerListEl.innerHTML = '<div style="color:var(--text-muted); padding:10px;">Loading...</div>';
   try {
-    const res = await fetch('/api/workspace/tree');
-    if (!res.ok) throw new Error('Failed to load tree');
+    const res = await fetch('/api/workspace/list?path=' + encodeURIComponent(path));
+    if (!res.ok) throw new Error('Failed to load');
     const data = await res.json();
     if (!data || data.length === 0) {
-      explorerTree.innerHTML = '<div style="color:var(--text-muted); padding:10px;">Workspace is empty</div>';
-      return;
+      explorerListEl.innerHTML = '<div style="color:var(--text-muted); padding:10px;">Folder is empty</div>';
+    } else {
+      explorerListEl.innerHTML = renderExplorerList(data);
     }
-    explorerTree.innerHTML = renderTree(data);
+    explorerPath = path;
+    updateExplorerBreadcrumb();
+    explorerSelection = '';
   } catch (err) {
-    explorerTree.innerHTML = '<div style="color:var(--danger); padding:10px;">Error loading files</div>';
+    explorerListEl.innerHTML = '<div style="color:var(--danger); padding:10px;">Error loading files</div>';
   }
 }
 
-window.toggleTreeNode = function(node) {
-  document.querySelectorAll('.tree-node.folder').forEach(el => el.classList.remove('selected'));
-  node.classList.add('selected');
-  selectedExplorerPath = node.getAttribute('data-path') || '';
-  const children = node.nextElementSibling;
-  if (children) children.classList.toggle('open');
-};
+function renderExplorerList(items) {
+  const folderSvg = '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="#facc15" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>';
+  const fileSvg = '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>';
 
-let selectedExplorerPath = '';
-
-function renderTree(nodes) {
   let html = '';
-  for (const node of nodes) {
-    if (node.type === 'dir') {
-      html += `
-        <div class="tree-item">
-          <div class="tree-node folder" data-path="${esc(node.path)}" onclick="toggleTreeNode(this)">
-            <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            <span class="tree-name">${esc(node.name)}</span>
-            <button class="project-delete" onclick="event.stopPropagation(); deleteExplorerItem('${esc(node.path)}', true)">x</button>
-          </div>
-          <div class="tree-children">
-            ${renderTree(node.children)}
-          </div>
-        </div>
-      `;
-    } else {
-      html += `
-        <div class="tree-item">
-          <div class="tree-node file" data-path="${esc(node.path)}" onclick="openWorkspaceFile(this.getAttribute('data-path'))">
-            <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
-            <span class="tree-name">${esc(node.name)}</span>
-            <button class="project-delete" onclick="event.stopPropagation(); deleteExplorerItem('${esc(node.path)}', false)">x</button>
-          </div>
-        </div>
-      `;
-    }
+  for (const item of items) {
+    const icon = item.type === 'dir' ? folderSvg : fileSvg;
+    html += `<div class="explorer-item" data-path="${esc(item.path)}" data-type="${esc(item.type)}">
+      ${icon}
+      <span class="item-name">${esc(item.name)}</span>
+    </div>`;
   }
   return html;
 }
 
-window.deleteExplorerItem = function(path, isDir) {
-  const msg = isDir ? `Are you sure you want to delete the folder "${path}" and all its contents?` : `Are you sure you want to delete the file "${path}"?`;
-  showConfirm('Delete item', msg, async () => {
-    try {
-      const res = await fetch('/api/workspace/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path })
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      if (selectedExplorerPath.startsWith(path)) selectedExplorerPath = '';
-      loadExplorerTree();
-    } catch (err) {
-      alert("Error: " + err.message);
+function updateExplorerBreadcrumb() {
+  if (!explorerBreadcrumbEl) return;
+  if (!explorerPath) {
+    explorerBreadcrumbEl.innerHTML = '<span class="crumb" data-path="">Workspace</span>';
+  } else {
+    const parts = explorerPath.split('/').filter(Boolean);
+    let html = '<span class="crumb" data-path="">Workspace</span>';
+    let buildPath = '';
+    for (const part of parts) {
+      buildPath += (buildPath ? '/' : '') + part;
+      html += '<span class="crumb-sep">/</span><span class="crumb" data-path="' + esc(buildPath) + '">' + esc(part) + '</span>';
+    }
+    explorerBreadcrumbEl.innerHTML = html;
+  }
+}
+
+function navigateExplorer(path) {
+  loadExplorerList(path);
+}
+
+function selectExplorerItem(path) {
+  explorerSelection = path;
+  document.querySelectorAll('.explorer-item').forEach(el => {
+    if (el.getAttribute('data-path') === path) {
+      el.classList.add('selected');
+    } else {
+      el.classList.remove('selected');
     }
   });
-};
+}
+
+if (explorerListEl) {
+  explorerListEl.addEventListener('click', (e) => {
+    const item = e.target.closest('.explorer-item');
+    if (!item) return;
+    const path = item.getAttribute('data-path');
+    selectExplorerItem(path);
+  });
+
+  explorerListEl.addEventListener('dblclick', (e) => {
+    const item = e.target.closest('.explorer-item');
+    if (!item) return;
+    const path = item.getAttribute('data-path');
+    const type = item.getAttribute('data-type');
+    if (type === 'dir') {
+      navigateExplorer(path);
+    } else {
+      openWorkspaceFile(path);
+    }
+  });
+}
+
+if (explorerBreadcrumbEl) {
+  explorerBreadcrumbEl.addEventListener('click', (e) => {
+    const crumb = e.target.closest('.crumb');
+    if (!crumb) return;
+    const path = crumb.getAttribute('data-path');
+    navigateExplorer(path);
+  });
+}
 
 window.openWorkspaceFile = async function(path) {
   try {
@@ -2778,6 +2819,27 @@ window.openWorkspaceFile = async function(path) {
   }
 };
 
+window.deleteExplorerItem = async function(path, isDir) {
+  const msg = isDir
+    ? `Are you sure you want to delete the folder "${path}" and all its contents?`
+    : `Are you sure you want to delete the file "${path}"?`;
+  showConfirm('Delete item', msg, async () => {
+    try {
+      const res = await fetch('/api/workspace/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (explorerSelection.startsWith(path)) explorerSelection = '';
+      loadExplorerList(explorerPath);
+    } catch (err) {
+      alert("Error: " + err.message);
+    }
+  });
+};
+
 window.showPromptModal = function(title, text, defaultValue, callback) {
   const modal = $('promptModal');
   if (!modal) return callback(prompt(text, defaultValue));
@@ -2785,7 +2847,7 @@ window.showPromptModal = function(title, text, defaultValue, callback) {
   $('promptText').textContent = text;
   const inputEl = $('promptInput');
   inputEl.value = defaultValue || '';
-  
+
   modal.style.display = 'flex';
   inputEl.focus();
   inputEl.select();
@@ -2821,7 +2883,7 @@ if (btnNewFile) {
   btnNewFile.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const prefix = selectedExplorerPath ? selectedExplorerPath + '/' : '';
+    const prefix = explorerPath ? explorerPath + '/' : '';
     showPromptModal('New File', 'Enter the file path (e.g., src/main.js):', prefix, async (name) => {
       if (!name) return;
       try {
@@ -2832,7 +2894,10 @@ if (btnNewFile) {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        loadExplorerTree();
+        // After creating, navigate to the parent folder if needed
+        const parent = name.includes('/') ? name.substring(0, name.lastIndexOf('/')) : '';
+        if (parent !== explorerPath) navigateExplorer(parent);
+        else loadExplorerList(explorerPath);
       } catch (err) {
         alert("Error: " + err.message);
       }
@@ -2844,7 +2909,7 @@ if (btnNewFolder) {
   btnNewFolder.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const prefix = selectedExplorerPath ? selectedExplorerPath + '/' : '';
+    const prefix = explorerPath ? explorerPath + '/' : '';
     showPromptModal('New Folder', 'Enter the folder path (e.g., src/components):', prefix, async (name) => {
       if (!name) return;
       try {
@@ -2855,11 +2920,60 @@ if (btnNewFolder) {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        loadExplorerTree();
+        loadExplorerList(explorerPath);
       } catch (err) {
         alert("Error: " + err.message);
       }
     });
+  });
+}
+
+// Copy / Paste / Delete buttons
+const btnExplorerCopy = document.getElementById('explorerCopy');
+const btnExplorerPaste = document.getElementById('explorerPaste');
+const btnExplorerDelete = document.getElementById('explorerDelete');
+
+if (btnExplorerCopy) {
+  btnExplorerCopy.addEventListener('click', () => {
+    if (!explorerSelection) return alert('Select a file or folder to copy');
+    clipboard = { action: 'copy', srcPath: explorerSelection };
+    showNotification('Copied to clipboard', 'success');
+  });
+}
+
+if (btnExplorerPaste) {
+  btnExplorerPaste.addEventListener('click', async () => {
+    if (!clipboard.action || !clipboard.srcPath) return alert('Nothing to paste');
+    if (!explorerPath && explorerSelection) {
+      // If a folder is selected in root, paste into it
+      const selectedEl = document.querySelector('.explorer-item.selected');
+      if (selectedEl && selectedEl.getAttribute('data-type') === 'dir') {
+        // OK: destination is the selected dir
+      }
+    }
+    const srcName = clipboard.srcPath.split('/').pop();
+    const destPath = explorerPath ? explorerPath + '/' + srcName : srcName;
+    try {
+      const res = await fetch('/api/workspace/copy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ src: clipboard.srcPath, dest: destPath })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      loadExplorerList(explorerPath);
+    } catch (err) {
+      alert('Paste failed: ' + err.message);
+    }
+  });
+}
+
+if (btnExplorerDelete) {
+  btnExplorerDelete.addEventListener('click', () => {
+    if (!explorerSelection) return alert('Select a file or folder to delete');
+    const el = document.querySelector('.explorer-item[data-path="' + CSS.escape(explorerSelection) + '"]');
+    const isDir = el && el.getAttribute('data-type') === 'dir';
+    window.deleteExplorerItem(explorerSelection, isDir);
   });
 }
 

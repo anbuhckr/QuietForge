@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/sashabaranov/go-openai"
@@ -32,12 +34,30 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 				textParts = append(textParts, part.Content)
 
 			case "tool_use":
+				args, ok := part.Arguments.(string)
+				if !ok || !json.Valid([]byte(args)) {
+					var preview string
+					if ok && len(args) > 2048 {
+						preview = args[:2048] + fmt.Sprintf("\n...(truncated, total: %d bytes)", len(args))
+					} else if ok {
+						preview = args
+					} else {
+						preview = fmt.Sprintf("(non-string arguments: %T)", part.Arguments)
+					}
+					textParts = append(textParts, fmt.Sprintf(
+						"[Tool call error: '%s' (id=%s) had incomplete/invalid JSON arguments. The tool was not executed. Attempted payload preview:\n%s]",
+						part.ToolName,
+						part.ToolCallID,
+						preview,
+					))
+					continue
+				}
 				toolCalls = append(toolCalls, openai.ToolCall{
 					ID:   part.ToolCallID,
 					Type: "function",
 					Function: openai.FunctionCall{
 						Name:      part.ToolName,
-						Arguments: part.Arguments.(string),
+						Arguments: args,
 					},
 				})
 

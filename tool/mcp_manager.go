@@ -270,6 +270,7 @@ type McpManager struct {
 	wg        sync.WaitGroup
 	Workspace string
 	cancel    context.CancelFunc
+	restartMu sync.Mutex
 }
 
 func NewMcpManager(registry *Registry) *McpManager {
@@ -310,6 +311,9 @@ func (m *McpManager) ConnectServers(ctx context.Context, servers []McpServerDef)
 }
 
 func (m *McpManager) RestartServers(ctx context.Context, servers []McpServerDef) {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+
 	m.Close()
 	m.mu.Lock()
 	m.servers = make(map[string]McpServerDef)
