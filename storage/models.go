@@ -36,7 +36,7 @@ type TodoRow struct {
 	Content    string `json:"content"`
 	Status     string `json:"status"`
 	CreatedAt  int64  `json:"created_at"`
-	Completedt int64  `json:"completed_at"`
+	CompletedAt int64  `json:"completed_at"`
 }
 
 type WorkspaceFileRow struct {

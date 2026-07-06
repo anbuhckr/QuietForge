@@ -7,11 +7,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"quietforge/tool"
 	"quietforge/util"
 	"strings"
 	"time"
+)
+
+const (
+	patchTimeout    = 30 * time.Second
+	maxPatchOutput  = 2000 // chars of stderr on failure
+	maxSRFileSize   = 5 * 1024 * 1024 // 5MB cap for search/replace files
 )
 
 type ApplyPatchTool struct{}
@@ -42,6 +47,10 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 		return &tool.ToolResult{Error: "invalid_args", Output: err.Error()}, nil
 	}
 
+	if strings.TrimSpace(params.Patch) == "" {
+		return &tool.ToolResult{Error: "invalid_args", Output: "Patch content is empty."}, nil
+	}
+
 	workspace := ctx.Workspace
 	if workspace == "" {
 		workspace, _ = os.Getwd()
@@ -51,36 +60,66 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 		return &tool.ToolResult{Error: "access_denied", Output: err.Error()}, nil
 	}
 
-	patchFile := filepath.Join(workspace, ".quietforge_temp.patch")
-	if err := os.WriteFile(patchFile, []byte(params.Patch), 0644); err != nil {
-		return &tool.ToolResult{Error: "write_error", Output: fmt.Sprintf("Failed to write patch file: %v", err)}, nil
+	tmpFile, err := os.CreateTemp(workspace, ".quietforge_temp_*.patch")
+	if err != nil {
+		return &tool.ToolResult{
+			Error:  "write_error",
+			Output: fmt.Sprintf("Failed to create temporary patch file: %v", err),
+		}, nil
 	}
-	defer os.Remove(patchFile)
+	defer os.Remove(tmpFile.Name())
 
-	execCtx, execCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := tmpFile.WriteString(params.Patch); err != nil {
+		_ = tmpFile.Close()
+		return &tool.ToolResult{
+			Error:  "write_error",
+			Output: fmt.Sprintf("Failed to write patch file: %v", err),
+		}, nil
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return &tool.ToolResult{
+			Error:  "write_error",
+			Output: fmt.Sprintf("Failed to finalize patch file: %v", err),
+		}, nil
+	}
+
+	patchFile := tmpFile.Name()
+
+	execCtx, execCancel := context.WithTimeout(ctx.Context, patchTimeout)
 	defer execCancel()
 
-	var gitOut, gitErr bytes.Buffer
-	gitCmd := exec.CommandContext(execCtx, "git", "apply", ".quietforge_temp.patch")
+	// Try git apply first
+	var gitErr bytes.Buffer
+	gitCmd := exec.CommandContext(execCtx, "git", "apply", patchFile)
 	gitCmd.Dir = workspace
-	gitCmd.Stdout = &gitOut
 	gitCmd.Stderr = &gitErr
 	if gitCmd.Run() == nil {
 		return &tool.ToolResult{Output: "Patch applied successfully via git apply."}, nil
 	}
 
-	var patchOut, patchErr bytes.Buffer
-	patchCmd := exec.CommandContext(execCtx, "patch", "-p1", "-i", ".quietforge_temp.patch")
+	// Fall back to patch utility
+	var patchErr bytes.Buffer
+	patchCmd := exec.CommandContext(execCtx, "patch", "-p1", "-i", patchFile)
 	patchCmd.Dir = workspace
-	patchCmd.Stdout = &patchOut
 	patchCmd.Stderr = &patchErr
 	if patchCmd.Run() == nil {
 		return &tool.ToolResult{Output: "Patch applied successfully via patch utility."}, nil
 	}
 
+	// Truncate error output
+	gitErrStr := gitErr.String()
+	if len(gitErrStr) > maxPatchOutput {
+		gitErrStr = gitErrStr[:maxPatchOutput] + "... [truncated]"
+	}
+	patchErrStr := patchErr.String()
+	if len(patchErrStr) > maxPatchOutput {
+		patchErrStr = patchErrStr[:maxPatchOutput] + "... [truncated]"
+	}
+
 	return &tool.ToolResult{
 		Error:  "patch_failed",
-		Output: fmt.Sprintf("Failed to apply patch.\nGit error: %s\nPatch error: %s", gitErr.String(), patchErr.String()),
+		Output: fmt.Sprintf("Failed to apply patch.\nGit error: %s\nPatch error: %s", gitErrStr, patchErrStr),
 	}, nil
 }
 
@@ -150,6 +189,10 @@ func cleanUnifiedPatchPath(path string) string {
 	return path
 }
 
+// ---------------------------------------------------------------------------
+// SearchReplaceTool — SEARCH/REPLACE blocks
+// ---------------------------------------------------------------------------
+
 type SearchReplaceTool struct{}
 
 func (t *SearchReplaceTool) ID() string {
@@ -193,50 +236,115 @@ func (t *SearchReplaceTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.T
 		return &tool.ToolResult{Error: "invalid_args", Output: err.Error()}, nil
 	}
 
-	var results []string
+	// Group blocks by file, then apply all blocks per file atomically.
+	// Build: file → ordered list of {search, replace, blockIndex}
+	type blockOp struct {
+		search  string
+		replace string
+		idx     int
+	}
+	fileOps := make(map[string][]blockOp)
 	for i, p := range params.Patches {
 		pathStr, err := util.JailPath(ctx.Workspace, p.FilePath)
 		if err != nil {
-			results = append(results, fmt.Sprintf("Block %d: Access denied: %v", i, err))
-			continue
+			return &tool.ToolResult{Error: "access_denied", Output: fmt.Sprintf("Block %d: Access denied: %v", i, err)}, nil
 		}
-
-		contentBytes, err := os.ReadFile(pathStr)
-		if err != nil {
-			results = append(results, fmt.Sprintf("Block %d: File not found: %s", i, p.FilePath))
-			continue
-		}
-
-		content := string(contentBytes)
-		hasCRLF := strings.Contains(content, "\r\n")
-		normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
-		normalizedSearch := strings.ReplaceAll(p.Search, "\r\n", "\n")
-		normalizedReplace := strings.ReplaceAll(p.Replace, "\r\n", "\n")
-
-		if !strings.Contains(normalizedContent, normalizedSearch) {
-			results = append(results, fmt.Sprintf("Block %d: SEARCH text not found in %s", i, p.FilePath))
-			continue
-		}
-
-		newContent := strings.Replace(normalizedContent, normalizedSearch, normalizedReplace, 1)
-		if hasCRLF {
-			newContent = strings.ReplaceAll(newContent, "\n", "\r\n")
-		}
-
-		if err := os.WriteFile(pathStr, []byte(newContent), 0644); err != nil {
-			results = append(results, fmt.Sprintf("Block %d: Failed to write %s: %v", i, p.FilePath, err))
-			continue
-		}
-
-		results = append(results, fmt.Sprintf("Block %d: Successfully patched %s", i, p.FilePath))
+		fileOps[pathStr] = append(fileOps[pathStr], blockOp{p.Search, p.Replace, i})
 	}
+
+	var results []string
+	patchesApplied := 0
+
+	for pathStr, ops := range fileOps {
+		select {
+		case <-ctx.Context.Done():
+			results = append(results, "Cancelled.")
+			goto doneSearch
+		default:
+		}
+
+		info, err := os.Stat(pathStr)
+		if err != nil {
+			for _, op := range ops {
+				results = append(results, fmt.Sprintf("Block %d: File not found: %s", op.idx, pathStr))
+			}
+			continue
+		}
+		if info.Size() > maxSRFileSize {
+			for _, op := range ops {
+				results = append(results, fmt.Sprintf("Block %d: File too large (%d bytes): %s", op.idx, info.Size(), pathStr))
+			}
+			continue
+		}
+
+		raw, err := os.ReadFile(pathStr)
+		if err != nil {
+			for _, op := range ops {
+				results = append(results, fmt.Sprintf("Block %d: Cannot read: %s", op.idx, pathStr))
+			}
+			continue
+		}
+
+		content := string(raw)
+		hasCRLF := strings.Contains(content, "\r\n")
+		if hasCRLF {
+			content = strings.ReplaceAll(content, "\r\n", "\n")
+		}
+
+		// Validate and apply against evolving content — chained edits work if
+		// each SEARCH matches exactly once in the content AFTER prior blocks.
+		working := content
+		applied := make(map[int]struct{})
+		fileFailed := false
+
+		for _, op := range ops {
+			normalizedSearch := strings.ReplaceAll(op.search, "\r\n", "\n")
+			count := strings.Count(working, normalizedSearch)
+			if count == 0 {
+				results = append(results, fmt.Sprintf("Block %d: SEARCH text not found in %s", op.idx, pathStr))
+				fileFailed = true
+				break
+			}
+			if count > 1 {
+				results = append(results, fmt.Sprintf("Block %d: SEARCH text found %d times in %s. Must match exactly once. Provide more surrounding context to make the match unique.", op.idx, count, pathStr))
+				fileFailed = true
+				break
+			}
+
+			normalizedReplace := strings.ReplaceAll(op.replace, "\r\n", "\n")
+			working = strings.Replace(working, normalizedSearch, normalizedReplace, 1)
+			applied[op.idx] = struct{}{}
+		}
+
+		if fileFailed || len(applied) == 0 {
+			continue
+		}
+
+		if hasCRLF {
+			working = strings.ReplaceAll(working, "\n", "\r\n")
+		}
+
+		perm := info.Mode().Perm()
+		if err := os.WriteFile(pathStr, []byte(working), perm); err != nil {
+			results = append(results, fmt.Sprintf("%s: Write failed: %v", pathStr, err))
+			continue
+		}
+
+		patchesApplied += len(applied)
+		for _, op := range ops {
+			if _, ok := applied[op.idx]; ok {
+				results = append(results, fmt.Sprintf("Block %d: Successfully patched %s", op.idx, pathStr))
+			}
+		}
+	}
+doneSearch:
 
 	output := strings.Join(results, "\n")
 	if output == "" {
 		output = "No patches applied."
 	}
 	return &tool.ToolResult{
-		Title:  fmt.Sprintf("Applied %d patch(es)", len(params.Patches)),
+		Title:  fmt.Sprintf("Applied %d patch(es)", patchesApplied),
 		Output: output,
 	}, nil
 }

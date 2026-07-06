@@ -20,7 +20,7 @@ type ExecutionEpisode struct {
 	Duration      string   `json:"duration"`
 }
 
-func ExtractExecutionEpisode(ctx context.Context, turnMessages []Message, client *provider.Client) (string, error) {
+func ExtractExecutionEpisode(ctx context.Context, turnMessages []Message, client *provider.Client, session *Session) (string, error) {
 	if len(turnMessages) == 0 {
 		return "", fmt.Errorf("no messages")
 	}
@@ -68,14 +68,18 @@ Execution Trace:
 	if err != nil {
 		return "", err
 	}
+	if session != nil {
+		session.AddTokens(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
 
 	if len(resp.Choices) > 0 {
 		content := resp.Choices[0].Message.Content
-		// validate json
 		var ep ExecutionEpisode
 		if err := json.Unmarshal([]byte(content), &ep); err == nil {
 			return content, nil
 		}
+	} else {
+		return "", fmt.Errorf("empty choices in response")
 	}
 	return "", fmt.Errorf("failed to extract episode")
 }

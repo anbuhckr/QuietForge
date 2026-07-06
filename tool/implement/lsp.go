@@ -52,6 +52,9 @@ func (t *LspTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult,
 	pos := map[string]any{"line": params.Line, "character": params.Column}
 	textDoc := map[string]any{"uri": fileURI}
 
+	if _, ok := ctx.Extra["repo"].(*storage.Repository); !ok {
+		return &tool.ToolResult{Error: "lsp_error", Output: "repository not available"}, nil
+	}
 	repo := ctx.Extra["repo"].(*storage.Repository)
 	srv, _, err := tool.GlobalLspManager.GetServer(ctx.Workspace, filePath, repo)
 	if err != nil || srv == nil {

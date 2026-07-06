@@ -26,6 +26,10 @@ func NewDatabase(path string) (*Database, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
 	// Set pragmas
 	_, err = db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
 	if err != nil {
@@ -52,8 +56,8 @@ func (d *Database) Close() error {
 }
 
 func (d *Database) Migrate() error {
-	query := `
-		CREATE TABLE IF NOT EXISTS sessions (
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL DEFAULT 'build',
 			workspace TEXT,
@@ -62,17 +66,15 @@ func (d *Database) Migrate() error {
 			metadata TEXT DEFAULT '{}',
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
 			completion_tokens INTEGER NOT NULL DEFAULT 0
-		);
-
-		CREATE TABLE IF NOT EXISTS messages (
+		)`,
+		`CREATE TABLE IF NOT EXISTS messages (
 			id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
 			role TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			metadata TEXT DEFAULT '{}'
-		);
-
-		CREATE TABLE IF NOT EXISTS message_parts (
+		)`,
+		`CREATE TABLE IF NOT EXISTS message_parts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
 			type TEXT NOT NULL,
@@ -82,19 +84,16 @@ func (d *Database) Migrate() error {
 			arguments TEXT,
 			tool_result_id TEXT,
 			is_error BOOLEAN DEFAULT 0
-		);
-
-		CREATE TABLE IF NOT EXISTS todos (
+		)`,
+		`CREATE TABLE IF NOT EXISTS todos (
 			id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
 			status TEXT NOT NULL DEFAULT 'pending',
 			content TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			completed_at INTEGER
-		);
-
-		
-		CREATE TABLE IF NOT EXISTS workspace_embeddings (
+		)`,
+		`CREATE TABLE IF NOT EXISTS workspace_embeddings (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			kind TEXT NOT NULL,
@@ -105,23 +104,20 @@ func (d *Database) Migrate() error {
 			hash TEXT NOT NULL,
 			embedding BLOB NOT NULL,
 			updated_at INTEGER NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_workspace_embeddings_ws ON workspace_embeddings(workspace);
-
-		CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
-		CREATE INDEX IF NOT EXISTS idx_message_parts_message_id ON message_parts(message_id);
-		CREATE INDEX IF NOT EXISTS idx_todos_session_id ON todos(session_id);
-
-		CREATE TABLE IF NOT EXISTS workspace_files_v2 (
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_embeddings_ws ON workspace_embeddings(workspace)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_message_parts_message_id ON message_parts(message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_todos_session_id ON todos(session_id)`,
+		`CREATE TABLE IF NOT EXISTS workspace_files_v2 (
 			workspace TEXT NOT NULL,
 			path TEXT NOT NULL,
 			purpose TEXT,
 			file_hash TEXT,
 			updated_at INTEGER NOT NULL,
 			PRIMARY KEY (workspace, path)
-		);
-
-		CREATE TABLE IF NOT EXISTS workspace_symbols (
+		)`,
+		`CREATE TABLE IF NOT EXISTS workspace_symbols (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			path TEXT NOT NULL,
@@ -131,17 +127,15 @@ func (d *Database) Migrate() error {
 			line_end INTEGER,
 			updated_at INTEGER NOT NULL,
 			FOREIGN KEY (workspace, path) REFERENCES workspace_files_v2(workspace, path) ON DELETE CASCADE
-		);
-
-		CREATE TABLE IF NOT EXISTS workspace_edges (
+		)`,
+		`CREATE TABLE IF NOT EXISTS workspace_edges (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			source_path TEXT NOT NULL,
 			target_path TEXT NOT NULL,
 			edge_type TEXT NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS workspace_diagnostics (
+		)`,
+		`CREATE TABLE IF NOT EXISTS workspace_diagnostics (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			path TEXT NOT NULL,
@@ -151,44 +145,60 @@ func (d *Database) Migrate() error {
 			severity TEXT NOT NULL,
 			message TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
-		);
-		
-		CREATE INDEX IF NOT EXISTS idx_workspace_symbols_path ON workspace_symbols(workspace, path);
-		CREATE INDEX IF NOT EXISTS idx_workspace_edges_source ON workspace_edges(workspace, source_path);
-
-		CREATE TABLE IF NOT EXISTS architecture_decisions_v2 (
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_symbols_path ON workspace_symbols(workspace, path)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_edges_source ON workspace_edges(workspace, source_path)`,
+		`CREATE TABLE IF NOT EXISTS display_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			parts TEXT NOT NULL DEFAULT '[]',
+			metadata TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_display_log_session ON display_log(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_display_log_message ON display_log(message_id)`,
+		`CREATE TABLE IF NOT EXISTS architecture_decisions_v2 (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			decision TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS architecture_constraints_v2 (
+		)`,
+		`CREATE TABLE IF NOT EXISTS architecture_constraints_v2 (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			constraint_text TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
-		);
-		
-		CREATE INDEX IF NOT EXISTS idx_workspace_files_workspace ON workspace_files_v2(workspace);
-		CREATE INDEX IF NOT EXISTS idx_arch_dec_workspace ON architecture_decisions_v2(workspace);
-		CREATE INDEX IF NOT EXISTS idx_arch_con_workspace ON architecture_constraints_v2(workspace);
-	`
-	_, err := d.Conn.Exec(query)
-	if err != nil {
-		return err
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_files_workspace ON workspace_files_v2(workspace)`,
+		`CREATE INDEX IF NOT EXISTS idx_arch_dec_workspace ON architecture_decisions_v2(workspace)`,
+		`CREATE INDEX IF NOT EXISTS idx_arch_con_workspace ON architecture_constraints_v2(workspace)`,
 	}
-	// Migrate existing tables that may lack columns added later
-	d.Conn.Exec("ALTER TABLE todos ADD COLUMN completed_at INTEGER")
-	d.Conn.Exec("ALTER TABLE sessions ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0")
-	d.Conn.Exec("ALTER TABLE sessions ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0")
-	d.Conn.Exec("ALTER TABLE workspace_files ADD COLUMN file_hash TEXT")
-	d.Conn.Exec("ALTER TABLE workspace_architecture ADD COLUMN scope TEXT DEFAULT 'global'")
-	d.Conn.Exec("ALTER TABLE workspace_diagnostics ADD COLUMN symbol TEXT")
-	d.Conn.Exec("ALTER TABLE workspace_diagnostics ADD COLUMN source TEXT")
-	d.Conn.Exec("ALTER TABLE workspace_diagnostics ADD COLUMN status TEXT DEFAULT 'active'")
+	for _, q := range queries {
+		if _, err := d.Conn.Exec(q); err != nil {
+			return err
+		}
+	}
+	// Run column migration only for tables/columns that may be missing from older schemas
+	migrateColumnIfMissing := func(table, column, clause string) {
+		var count int
+		if err := d.Conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?", table, column).Scan(&count); err != nil || count > 0 {
+			return
+		}
+		d.Conn.Exec("ALTER TABLE " + table + " ADD COLUMN " + clause)
+	}
+
+	migrateColumnIfMissing("todos", "completed_at", "completed_at INTEGER")
+	migrateColumnIfMissing("sessions", "prompt_tokens", "prompt_tokens INTEGER NOT NULL DEFAULT 0")
+	migrateColumnIfMissing("sessions", "completion_tokens", "completion_tokens INTEGER NOT NULL DEFAULT 0")
+	migrateColumnIfMissing("workspace_files", "file_hash", "file_hash TEXT")
+	migrateColumnIfMissing("workspace_diagnostics", "symbol", "symbol TEXT")
+	migrateColumnIfMissing("workspace_diagnostics", "source", "source TEXT")
+	migrateColumnIfMissing("workspace_diagnostics", "status", "status TEXT DEFAULT 'active'")
 
 	// Perform zero-downtime internal migration for workspace memory to bind to workspace instead of session_id
+	var err error
 	var tableExists bool
 	err = d.Conn.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_files')").Scan(&tableExists)
 	if err == nil && tableExists {

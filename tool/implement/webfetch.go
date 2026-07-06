@@ -2,7 +2,6 @@ package implement
 
 import (
 	"quietforge/tool"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -46,12 +45,8 @@ func (t *WebFetchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolRe
 
 	url := params.URL
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
 	client := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: tr,
+		Timeout: 30 * time.Second,
 	}
 
 	req, err := http.NewRequestWithContext(ctx.Context, "GET", url, nil)

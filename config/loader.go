@@ -140,6 +140,12 @@ func parseConfig(data map[string]any) Config {
 			mmInt := int(mm)
 			pConf.MaxMessages = &mmInt
 		}
+		if inPrice, ok := pc["input_price"].(float64); ok {
+			pConf.InputPrice = &inPrice
+		}
+		if outPrice, ok := pc["output_price"].(float64); ok {
+			pConf.OutputPrice = &outPrice
+		}
 		if opts, ok := pc["options"].(map[string]any); ok {
 			pConf.Options = opts
 		} else {
@@ -238,28 +244,6 @@ func parseConfig(data map[string]any) Config {
 	if shell, ok := data["shell"].(string); ok {
 		cfg.Shell = &shell
 	}
-	if comp, ok := data["compaction"].(map[string]any); ok {
-		c := &CompactionConfig{}
-		if auto, ok := comp["auto"].(bool); ok {
-			c.Auto = auto
-		}
-		if tail, ok := comp["tail_turns"].(float64); ok {
-			c.TailTurns = int(tail)
-		}
-		if preserve, ok := comp["preserve_recent_tokens"].(float64); ok {
-			c.PreserveRecentTokens = int(preserve)
-		}
-		if reserved, ok := comp["reserved"].(float64); ok {
-			c.Reserved = int(reserved)
-		}
-		if prune, ok := comp["prune"].(bool); ok {
-			c.Prune = prune
-		}
-		if trunc, ok := comp["tool_truncation_limit"].(float64); ok {
-			c.ToolTruncationLimit = int(trunc)
-		}
-		cfg.Compaction = c
-	}
 	if username, ok := data["username"].(string); ok {
 		cfg.Username = &username
 	}
@@ -328,6 +312,12 @@ func configToDict(cfg Config) map[string]any {
 			}
 			if v.MaxMessages != nil {
 				pd["max_messages"] = float64(*v.MaxMessages)
+			}
+			if v.InputPrice != nil {
+				pd["input_price"] = *v.InputPrice
+			}
+			if v.OutputPrice != nil {
+				pd["output_price"] = *v.OutputPrice
 			}
 			pd["options"] = v.Options
 			providers[k] = pd

@@ -287,9 +287,9 @@ class ConversationState {
     return this.turns[this.turns.length - 1];
   }
 
-  clear() {
+  async clear() {
     this.turns = [];
-    this.render();
+    await this.render();
   }
 
   formatToolCall(rawStr) {
@@ -351,15 +351,16 @@ class ConversationState {
      }
   }
 
-  addSystemMsg(txt) {
+  async addSystemMsg(txt) {
     this.turns.push({ system: txt });
-    this.render();
+    await this.render();
   }
 
-  loadDb(messages) {
+  async loadDb(displayLog) {
+    const source = displayLog || [];
     this.turns = [];
     document.getElementById('chat').innerHTML = '';
-    messages.forEach(msg => {
+    source.forEach(msg => {
       const role = String(msg.role || '').toLowerCase();
       const parts = msg.parts || [];
       
@@ -369,15 +370,8 @@ class ConversationState {
             this.turns[this.turns.length - 1].completed = true;
         }
 
-        const isCompaction = parts.some(p => p.type === 'compaction');
         const isToolResult = parts.some(p => p.type === 'tool_result' || (p.type === 'text' && p.content && p.content.match(/^\[.*? Result\]\n/)));
-        if (isCompaction) {
-          const turn = this._currentTurn();
-          if (turn.liveContainer.length === 0) {
-            turn.liveContainer.push({ think: null, tools: [] });
-          }
-          turn.liveContainer[turn.liveContainer.length - 1].tools.push('compacting...');
-        } else if (isToolResult) {
+        if (isToolResult) {
           // Do nothing, this is just a tool result in the middle of a turn's tool loop
         } else {
           this.turns.push({
@@ -456,10 +450,10 @@ class ConversationState {
         }
       }
     });
-    this.render();
+    await this.render();
   }
 
-  addLiveEvent(evt) {
+  async addLiveEvent(evt) {
     const turn = this._currentTurn();
     const kind = evt.type || evt.kind || 'activity';
     const rawText = String(evt.text || evt.event || evt.message || evt.error || '').trim();
@@ -504,8 +498,8 @@ class ConversationState {
       if (evt.workspace_changes) turn.workspaceChanges = evt.workspace_changes;
     }
 
-    requestAnimationFrame(() => {
-      this.render();
+    requestAnimationFrame(async () => {
+      await this.render();
     });
   }
 
@@ -517,7 +511,7 @@ class ConversationState {
     return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
   }
 
-  render() {
+  async render() {
     const shouldFollow = chatIsNearBottom();
     const chat = document.getElementById('chat');
 
@@ -551,7 +545,7 @@ class ConversationState {
             }
         }
         
-        this._renderTurn(turnGroup, turn);
+        await this._renderTurn(turnGroup, turn);
         
         // Mark as final if it's a completed historical turn
         if (!isLast && turn.completed) {
@@ -563,7 +557,7 @@ class ConversationState {
     if (shouldFollow) scrollChatToBottom();
   }
 
-  _renderTurn(turnGroup, turn) {
+  async _renderTurn(turnGroup, turn) {
       if (turn.system) {
           let sysD = turnGroup.querySelector('.msg.agent');
           if (!sysD) {
@@ -602,8 +596,8 @@ class ConversationState {
                   });
                   if (r.ok) {
                     const data = await r.json();
-                    this.loadDb(data.session_log || []);
-                    refresh(); 
+                    this.loadDb(data.display_log);
+                    await refresh(); 
                   }
                 };
                 d.querySelector('.label').after(btn);
@@ -789,35 +783,35 @@ class ConversationState {
 const conversationState = new ConversationState();
 
 // Wrappers for old API
-function addMsg(role, txt, opts) {
+async function addMsg(role, txt, opts) {
     if (role.toLowerCase() === 'system') conversationState.addSystemMsg(txt);
     else if (role.toLowerCase() === 'user') {
         if (conversationState.turns.length > 0) {
             conversationState.turns[conversationState.turns.length - 1].completed = true;
         }
         conversationState.turns.push({ user: txt, agent: null, liveContainer: [], completed: false, durationMs: 0 });
-        conversationState.render();
+        await conversationState.render();
     }
     else if (role.toLowerCase() === 'agent') {
         const turn = conversationState._currentTurn();
         turn.agent = txt;
-        conversationState.render();
+        await conversationState.render();
     }
 }
-function updateInlineLive(text, state, opts) {
-    conversationState.addLiveEvent({ type: 'think', text: text });
+async function updateInlineLive(text, state, opts) {
+    await conversationState.addLiveEvent({ type: 'think', text: text });
 }
-function compactLiveTranscript(durationMs) {
+async function compactLiveTranscript(durationMs) {
     const turn = conversationState._currentTurn();
     turn.durationMs = durationMs;
     turn.completed = true;
-    conversationState.render();
+    await conversationState.render();
 }
 function updateTimer() {
     conversationState.updateTimer();
 }
-function renderSession(log) {
-    conversationState.loadDb(log || []);
+async function renderSession(displayLog) {
+    await conversationState.loadDb(displayLog);
 }
 
 
@@ -835,7 +829,7 @@ function updateSendStopButtons() {
   }
 }
 
-function setRunningState(isRunning, isStopping = false, backendStartTime = 0) {
+async function setRunningState(isRunning, isStopping = false, backendStartTime = 0) {
   if (isRunning && !running) { window._newDiffArtifacts = []; _notifQueued = false; }
   running = isRunning;
   stopping = isStopping;
@@ -843,7 +837,7 @@ function setRunningState(isRunning, isStopping = false, backendStartTime = 0) {
   $('editor').disabled = !projectSelected;
   $('attachBtn').disabled = isRunning || !projectSelected;
   updateSendStopButtons();
-  if (isStopping) updateInlineLive('Stopping', 'stopping');
+  if (isStopping) await updateInlineLive('Stopping', 'stopping');
   if (isRunning && !isStopping) {
     if (backendStartTime > 0) {
       runStartTime = backendStartTime;
@@ -855,14 +849,12 @@ function setRunningState(isRunning, isStopping = false, backendStartTime = 0) {
       updateTimer();
     }
   } else if (!isRunning) {
-    if (!running) {
-      // Already not running; prevent overwriting duration with stale 0ms
-      return;
-    }
     const elapsedMs = runStartTime ? Date.now() - runStartTime : 0;
     clearInterval(runTimerInterval);
     runTimerInterval = null;
-    compactLiveTranscript(elapsedMs);
+    if (elapsedMs > 0) {
+        await compactLiveTranscript(elapsedMs);
+    }
     runStartTime = 0;
   }
 }
@@ -877,7 +869,7 @@ async function readJsonOrText(r) {
   }
 }
 
-function renderProjects(projects = []) {
+async function renderProjects(projects = []) {
   const box = $('projectList');
   box.innerHTML = '';
   if (!projects.length) {
@@ -918,7 +910,7 @@ function renderProjects(projects = []) {
             })
           });
           const d = await r.json();
-          if (d.ok) renderSession(d.session_log);
+          if (d.ok) await renderSession(d.display_log);
           await refresh();
           document.querySelector('.col.left').classList.remove('open');
           document.body.classList.remove('drawer-open');
@@ -936,7 +928,7 @@ function renderProjects(projects = []) {
             })
           });
           const d = await r.json();
-          if (d.ok) renderSession(d.session_log);
+          if (d.ok) await renderSession(d.display_log);
           await refresh()
         };
         chats.appendChild(row)
@@ -1062,7 +1054,7 @@ async function refresh() {
     $('workSub').textContent = projectSelected ? (a.workspace || '') : 'No workspace active.';
     _updateTokenDisplay();
     renderBackendDiagnostics(a.backend_diagnostics || {});
-    setRunningState(!!a.running, !!a.stop_requested, a.start_time);
+    await setRunningState(!!a.running, !!a.stop_requested, a.start_time);
     if (a.artifacts !== undefined) window.latestArtifacts = a.artifacts;
     
     // Auth logic for Logout button
@@ -1098,20 +1090,20 @@ async function refresh() {
 
 
 
-    if (a.projects !== undefined) renderProjects(a.projects);
+    if (a.projects !== undefined) await renderProjects(a.projects);
     if (firstStatus) {
-      renderSession(a.session_log || []);
+      await renderSession(a.display_log);
       firstStatus = false;
       if (a.running) {
         try {
           const act = await fetch('/api/activity').then(res => res.json());
           const events = act.events || a.live_events || [];
           if (events.length > 0) {
-            events.forEach(evt => {
+            events.forEach(async evt => {
               if (typeof evt === 'string') {
-                handleAgentEvent({ type: 'activity', event: evt }, true);
+                await ({ type: 'activity', event: evt }, true);
               } else {
-                handleAgentEvent(evt, true);
+                await handleAgentEvent(evt, true);
               }
             });
           }
@@ -1132,7 +1124,7 @@ async function refresh() {
         }
         if (!wasFirstStatus) {
           const newArt = currentArtifacts[newLen - 1];
-          updateInlineLive(`Created artifact: ${newArt.title}`, running ? 'running' : 'done', {
+          await updateInlineLive(`Created artifact: ${newArt.title}`, running ? 'running' : 'done', {
             log: true
           });
         }
@@ -1141,16 +1133,16 @@ async function refresh() {
     if (a.running && !sseSource) {
       try {
         sseSource = new EventSource('/api/stream/activity');
-        sseSource.onmessage = sseOnMessage;
-        sseSource.onerror = sseOnError;
+        sseSource.onmessage = await sseOnMessage;
+        sseSource.onerror = await sseOnError;
       } catch (ex) {
         console.log('SSE not available, falling back to polling');
       }
-      updateInlineLive(a.activity || 'Thinking', a.stop_requested ? 'stopping' : 'running', {
+      await updateInlineLive(a.activity || 'Thinking', a.stop_requested ? 'stopping' : 'running', {
         log: false
       })
     } else if (!a.running && running) {
-      setRunningState(false, false);
+      await setRunningState(false, false);
       if (!_notifQueued) {
         _notifQueued = true;
         _playNotificationSound();
@@ -1224,7 +1216,7 @@ async function removeProject(path, e) {
       alert(d.error || 'Remove failed');
       return
     }
-    renderSession([]);
+    await renderSession([]);
     firstStatus = true;
     await refresh();
   });
@@ -1250,7 +1242,7 @@ async function uploadFiles(files) {
   setEditorText(t + ' ')
 }
   // Enhancement: SSE streaming for live activity updates  
-function handleAgentEvent(d, isHistory = false) {
+async function handleAgentEvent(d, isHistory = false) {
   if (d.conversation_id && window.currentConversationId && d.conversation_id !== window.currentConversationId) {
     return; // Filter out live events belonging to a different background session
   }
@@ -1264,23 +1256,23 @@ function handleAgentEvent(d, isHistory = false) {
     return;
   }
   if (d.type === 'primary_changed') {
-    if (!isHistory) refresh();
+    if (!isHistory) await refresh();
     return;
   }
   
   if (d.type === 'error') {
     const errMsg = d.error || d.message || 'An error occurred';
-    if (!isHistory) conversationState.addSystemMsg('⚠️ ' + errMsg);
+    if (!isHistory) await conversationState.addSystemMsg('⚠️ ' + errMsg);
     if (sseSource) { sseSource.close(); sseSource = null; }
     clearInterval(poll); poll = null;
-    setRunningState(false, false);
+    await setRunningState(false, false);
     if (!isHistory) {
        const t = conversationState._currentTurn();
        t.completed = true;
-       conversationState.render();
+       await conversationState.render();
     }
     firstStatus = true;
-    if (!isHistory) refresh();
+    if (!isHistory) await refresh();
     return;
   }
   
@@ -1289,9 +1281,9 @@ function handleAgentEvent(d, isHistory = false) {
      if (!isHistory) _playNotificationSound();
      
       if (d.response) {
-          conversationState.addLiveEvent({ type: 'token', text: d.response });
+          await conversationState.addLiveEvent({ type: 'token', text: d.response });
       }
-      conversationState.addLiveEvent({ 
+      await conversationState.addLiveEvent({ 
           type: 'done', 
           duration_ms: d.duration_ms, 
           workspace_changes: d.workspace_changes 
@@ -1303,12 +1295,11 @@ function handleAgentEvent(d, isHistory = false) {
      }
      clearInterval(poll);
      poll = null;
-     setRunningState(false, false);
+     await setRunningState(false, false);
      firstStatus = true;
       if (!isHistory) {
-        refresh().then(() => {
-          conversationState.render();
-        });
+        await refresh();
+        await conversationState.render();
       }
      return;
   }
@@ -1343,16 +1334,16 @@ function handleAgentEvent(d, isHistory = false) {
   }
   
   // Default pass-through to new state manager
-  conversationState.addLiveEvent(d);
+  await conversationState.addLiveEvent(d);
 }
-function sseOnMessage(e) {
+async function sseOnMessage(e) {
   try {
     const d = JSON.parse(e.data);
-    handleAgentEvent(d, false);
+    await handleAgentEvent(d, false);
   } catch (ex) {}
 }
 
-function sseOnError() {
+async function sseOnError() {
   if (sseSource) {
     sseSource.close();
     sseSource = null
@@ -1360,18 +1351,18 @@ function sseOnError() {
   // High fix #5: start polling fallback immediately so live activity doesn't freeze
   if (!poll) poll = setInterval(refresh, 900);
   // Attempt SSE reconnect after 2s (only while agent is still running)
-  setTimeout(() => {
+  setTimeout(async () => {
     if (running && !sseSource) {
       try {
         sseSource = new EventSource('/api/stream/activity');
-        sseSource.onmessage = sseOnMessage;
-        sseSource.onerror = sseOnError;
-        sseSource.onopen = function () {
+        sseSource.onmessage = await sseOnMessage;
+        sseSource.onerror = await sseOnError;
+        sseSource.onopen = async function () {
           if (poll) {
             clearInterval(poll);
             poll = null;
           }
-          refresh();
+          await refresh();
         };
       } catch (ex) {
         /* stay on poll fallback */ }
@@ -1400,7 +1391,7 @@ async function send() {
       const data = await r.json();
       if (r.ok && data.ok) {
         setEditorText('');
-        addMsg('User', text);
+        await addMsg('User', text);
         updateSendStopButtons();
         scrollChatToBottom();
       } else {
@@ -1416,15 +1407,15 @@ async function send() {
   
   isSending = true;
 
-  addMsg('User', text);
-  updateInlineLive('Thinking...', 'running');
-  setRunningState(true, false);
+  await addMsg('User', text);
+  await updateInlineLive('Thinking...', 'running');
+  await setRunningState(true, false);
   setEditorText('');
 
   try {
     sseSource = new EventSource('/api/stream/activity');
-    sseSource.onmessage = sseOnMessage;
-    sseSource.onerror = sseOnError;
+    sseSource.onmessage = await sseOnMessage;
+    sseSource.onerror = await sseOnError;
   } catch (ex) {
     console.log('SSE not available, falling back to polling');
     poll = setInterval(refresh, 900)
@@ -1452,33 +1443,33 @@ async function send() {
       throw new Error(data.error || 'Request failed')
     }
     // engine thread now alive — ensure stop button is visible
-    setRunningState(true, false);
+    await setRunningState(true, false);
     // POST returns immediately. Results delivered via SSE 'complete' event.
   } catch (e) {
     postError = true;
-    updateInlineLive('Failed', 'failed');
+    await updateInlineLive('Failed', 'failed');
     if (e.name === 'AbortError' || e.message.includes('abort') || e.message.includes('cancel')) {
       try {
         const r_status = await fetch('/api/status?full=true');
         const d_status = await r_status.json();
-        if (d_status.session_log && d_status.session_log.length > 0) {
-          renderSession(d_status.session_log);
+        if (d_status.display_log && d_status.display_log.length > 0) {
+          await renderSession(d_status.display_log);
         } else {
-          addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
+          await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
         }
       } catch (ex) {
-        addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
+        await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
       }
     } else {
-      addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
+      await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
     }
   } finally {
     if (postError) {
       // Error path: do full cleanup immediately
       if (sseSource) { sseSource.close(); sseSource = null }
       clearInterval(poll); poll = null;
-      setRunningState(false, false);
-      compactLiveTranscript();
+      await setRunningState(false, false);
+      await compactLiveTranscript();
     }
     // Success path: SSE 'complete' handler handles cleanup.
     isSending = false;
@@ -1488,13 +1479,13 @@ async function send() {
 
 async function stopRun() {
   if (!running) return;
-  setRunningState(true, true);
+  await setRunningState(true, true);
   try {
     await fetch('/api/stop', {
       method: 'POST'
     })
   } catch (e) {
-    addMsg('Agent', 'STOP ERROR: ' + e.message)
+    await addMsg('Agent', 'STOP ERROR: ' + e.message)
   } finally {
     await refresh()
   }
@@ -1672,6 +1663,17 @@ function addProviderUI(p, isPrimary) {
       </div>
     </div>
     
+    <div style="display:flex; gap:10px; margin-top: 8px;">
+      <div style="flex:1;">
+        <label class="config-label">Price / 1M Input Tokens ($)</label>
+        <input type="number" class="config-input cfg-input-price" value="${p.input_price || 0}" step="0.01" min="0" placeholder="Auto from catalog">
+      </div>
+      <div style="flex:1;">
+        <label class="config-label">Price / 1M Output Tokens ($)</label>
+        <input type="number" class="config-input cfg-output-price" value="${p.output_price || 0}" step="0.01" min="0" placeholder="Auto from catalog">
+      </div>
+    </div>
+    
     <label class="config-label" style="margin-top: 8px; display:flex; align-items:center; gap:8px;">
       <input type="checkbox" class="cfg-disable-vision" ${p.disable_vision ? 'checked' : ''}> Disable Vision (Strip Images)
     </label>
@@ -1756,7 +1758,9 @@ $('settingsSave').onclick = async () => {
       api_key: el.querySelector('.cfg-api-key').value,
       disable_vision: el.querySelector('.cfg-disable-vision').checked,
       context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
-      max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0
+      max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0,
+      input_price: parseFloat(el.querySelector('.cfg-input-price')?.value) || 0,
+      output_price: parseFloat(el.querySelector('.cfg-output-price')?.value) || 0
     };
   });
   const p = {
@@ -1934,7 +1938,7 @@ $('compactionSave').onclick = async () => {
 $('send').onclick = send;
 $('stopBtn').onclick = stopRun;
 $('attachBtn').onclick = () => $('fileInput').click();
-$('fileInput').onchange = e => uploadFiles(e.target.files).catch(err => addMsg('Agent', 'UPLOAD ERROR: ' + err.message));
+$('fileInput').onchange = async e => await (uploadFiles(e.target.files).catch(async err => await addMsg('Agent', 'UPLOAD ERROR: ' + err.message)));
 $('refreshBtn').onclick = refresh;
 
 // Mode dropdown
@@ -1992,7 +1996,7 @@ function updateModelTag(model, workspace) {
 }
 
 renderChips('');
-refresh();
+(async () => { await refresh(); })();
 
 
 if ($('newChatBtn')) $('newChatBtn').onclick = async () => {
@@ -2000,7 +2004,7 @@ if ($('newChatBtn')) $('newChatBtn').onclick = async () => {
     method: 'POST'
   });
           const d = await r.json();
-          if (d.ok) renderSession(d.session_log);
+          if (d.ok) await renderSession(d.display_log);
           await refresh();
           document.querySelector('.col.left').classList.remove('open');
           document.body.classList.remove('drawer-open');

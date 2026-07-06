@@ -73,6 +73,13 @@ var (
 	repo             *storage.Repository
 )
 
+const (
+	maxEngineCycles        = 150
+	maxSubagentCycles      = 50
+	maxLiveEvents          = 1000
+	toolApprovalTimeoutMin = 10
+)
+
 type SSHProcess struct {
 	Cmd    *exec.Cmd
 	Done   chan struct{}
@@ -90,6 +97,14 @@ type projectEntry struct {
 
 func loadCfg() config.Config {
 	return config.LoadConfig(".")
+}
+
+func reloadAppConfig(workspaceDir string) {
+	if workspaceDir != "" {
+		appCfg = config.LoadConfig(workspaceDir)
+	} else {
+		appCfg = config.LoadConfig(".")
+	}
 }
 
 func buildProviderInstance(id, apiKey, baseURL, model string, disableVision bool) *provider.ProviderInstance {
@@ -253,7 +268,7 @@ func askPermissionCallback(toolName, toolInput, agentID string) (bool, error) {
 	select {
 	case result := <-ch:
 		return result, nil
-	case <-time.After(10 * time.Minute):
+	case <-time.After(time.Duration(toolApprovalTimeoutMin) * time.Minute):
 		return false, fmt.Errorf("timeout waiting for user approval")
 	}
 }
@@ -326,6 +341,21 @@ func getSessionLog() []map[string]any {
 		clean = append(clean, entry)
 	}
 	return clean
+}
+
+func getDisplayLog() []map[string]any {
+	sessionMu.RLock()
+	s := activeSession
+	sessionMu.RUnlock()
+	if s == nil || s.Repo == nil {
+		return nil
+	}
+	log, err := s.Repo.GetDisplayLog(s.SessionID)
+	if err != nil {
+		debugLog("getDisplayLog: %v", err)
+		return nil
+	}
+	return log
 }
 
 type projectRegistry struct {
@@ -506,6 +536,9 @@ func addLiveEvent(typ string, data map[string]any) {
 		entry["type"] = "activity"
 	}
 	liveEvents = append(liveEvents, entry)
+	if len(liveEvents) > maxLiveEvents {
+		liveEvents = liveEvents[len(liveEvents)-maxLiveEvents:]
+	}
 	debugLog("addLiveEvent: type=%s msg=%.60s liveEvents=%d", typ, msg, len(liveEvents))
 	go broadcastEvent(entry)
 }
@@ -615,20 +648,23 @@ func loadLatestSession(ws string) {
 	if err != nil {
 		return
 	}
-	defer d.Close()
 	r := storage.NewRepository(d)
 	rows, err := r.ListSessions(1, ws)
 	if err != nil || len(rows) == 0 {
+		d.Close()
 		return
 	}
 	latest := rows[0]
 	s := session.NewSession(latest.ID, r, latest.AgentID, configToDict(appCfg), ws)
 	if err := s.Load(); err != nil {
+		d.Close()
 		return
 	}
 	if len(s.GetHistory()) > 0 {
 		activeConversation = latest.ID
 		activeSession = s
+	} else {
+		d.Close()
 	}
 }
 
@@ -701,7 +737,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.0.8")
+		fmt.Println("QuietForge v1.0.9")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -744,7 +780,6 @@ func main() {
 	registerTools()
 
 	mcpManager = tool.NewMcpManager(toolRegistry)
-	mcpManager.Workspace = workspaceDir
 	if appCfg.Mcp != nil && len(appCfg.Mcp.Servers) > 0 {
 		var mcpServers []tool.McpServerDef
 		for name, sc := range appCfg.Mcp.Servers {
@@ -858,6 +893,7 @@ func main() {
 				log.Fatalf("Failed to start TLS listener: %v", err)
 			}
 			log.Fatal(app.Listener(listener))
+			return
 		}
 	}
 	log.Fatal(app.Listen(addr))
@@ -1216,8 +1252,8 @@ func setupHealthRoutes(api fiber.Router) {
 			"agent":                   agentID,
 			"total_prompt_tokens":     getPromptTokens(),
 			"total_completion_tokens": getCompletionTokens(),
-			"input_token_price":       2.50,
-			"output_token_price":      10.00,
+			"input_token_price":       getModelInputPrice(cfg, model),
+			"output_token_price":      getModelOutputPrice(cfg, model),
 			"features":                fiber.Map{},
 			"stop_requested":          stopRequested,
 			"backend_diagnostics":     fiber.Map{},
@@ -1245,6 +1281,7 @@ func setupHealthRoutes(api fiber.Router) {
 			}
 			resp["projects"] = projects
 			resp["session_log"] = getSessionLog()
+			resp["display_log"] = getDisplayLog()
 			eventsMu.Lock()
 			eventsCopy := make([]map[string]any, len(liveEvents))
 			copy(eventsCopy, liveEvents)
@@ -1260,9 +1297,6 @@ func setupHealthRoutes(api fiber.Router) {
 
 func configToDict(cfg config.Config) map[string]any {
 	d := make(map[string]any)
-	if p, ok := cfg.Provider["primary"]; ok && p.Model != nil {
-		d["model"] = *p.Model
-	}
 	if len(cfg.Provider) > 0 {
 		providers := make(map[string]any, len(cfg.Provider))
 		for k, v := range cfg.Provider {
@@ -1272,6 +1306,9 @@ func configToDict(cfg config.Config) map[string]any {
 			}
 			if v.BaseURL != nil {
 				pd["base_url"] = *v.BaseURL
+			}
+			if v.Model != nil {
+				pd["model"] = *v.Model
 			}
 			pd["options"] = v.Options
 			providers[k] = pd
@@ -1298,6 +1335,16 @@ func configToDict(cfg config.Config) map[string]any {
 	}
 	if len(cfg.Mode) > 0 {
 		d["mode"] = cfg.Mode
+	}
+	if cfg.Compaction != nil {
+		comp := make(map[string]any)
+		comp["auto"] = cfg.Compaction.Auto
+		comp["prune"] = cfg.Compaction.Prune
+		comp["tail_turns"] = float64(cfg.Compaction.TailTurns)
+		comp["preserve_recent_tokens"] = float64(cfg.Compaction.PreserveRecentTokens)
+		comp["reserved"] = float64(cfg.Compaction.Reserved)
+		comp["tool_truncation_limit"] = float64(cfg.Compaction.ToolTruncationLimit)
+		d["compaction"] = comp
 	}
 	return d
 }
@@ -1336,6 +1383,7 @@ func setupChatRoutes(api fiber.Router) {
 			"ok":              true,
 			"conversation_id": activeConversation,
 			"session_log":     []map[string]any{},
+			"display_log":     []map[string]any{},
 		})
 	})
 
@@ -1371,13 +1419,14 @@ func setupChatRoutes(api fiber.Router) {
 			if err != nil {
 				return false, err
 			}
-			defer d.Close()
 			r := storage.NewRepository(d)
 			s := session.NewSession(cid, r, "build", configToDict(appCfg), workspace)
 			if err := s.Load(); err != nil {
+				d.Close()
 				return false, err
 			}
 			if len(s.GetHistory()) == 0 {
+				d.Close()
 				return false, nil
 			}
 			activeSession = s
@@ -1412,6 +1461,7 @@ func setupChatRoutes(api fiber.Router) {
 			"ok":              true,
 			"conversation_id": activeConversation,
 			"session_log":     sessionLog,
+			"display_log":     getDisplayLog(),
 		})
 	})
 
@@ -1423,7 +1473,10 @@ func setupChatRoutes(api fiber.Router) {
 		var payload struct {
 			ID string `json:"id"`
 		}
-		json.Unmarshal(body, &payload)
+		if err := json.Unmarshal(body, &payload); err != nil {
+			debugLog("/chat/delete: invalid JSON body: %v", err)
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
+		}
 		convID := payload.ID
 		if convID == "" {
 			convID = activeConversation
@@ -1477,7 +1530,7 @@ func setupChatRoutes(api fiber.Router) {
 		}
 		needsFullRefresh = true
 		debugLog("/chat/delete: needsFullRefresh set to true")
-		return c.JSON(fiber.Map{"ok": true, "session_log": []any{}})
+		return c.JSON(fiber.Map{"ok": true, "session_log": []any{}, "display_log": []map[string]any{}})
 	})
 
 	api.Post("/chat/revert", func(c *fiber.Ctx) error {
@@ -1537,12 +1590,20 @@ func setupChatRoutes(api fiber.Router) {
 					}
 				}
 			}
+			// Clean up Git tags for reverted snapshots to prevent stale refs
+			if snapRaw, ok := m.Metadata["snapshot"]; ok {
+				if snapHash, ok := snapRaw.(string); ok && snapHash != "" {
+					tagDel := exec.Command("git", "tag", "-d", "quietforge-"+snapHash)
+					tagDel.Dir = ws
+					tagDel.Run()
+				}
+			}
 		}
-		if repo != nil {
-			repo.DeleteMessagesAfter(activeSession.SessionID, targetMsg.CreatedAt)
+		if activeSession.Repo != nil {
+			activeSession.Repo.DeleteMessagesAfter(activeSession.SessionID, targetMsg.CreatedAt)
 		}
 		activeSession.Load()
-		return c.JSON(fiber.Map{"ok": true, "session_log": getSessionLog()})
+		return c.JSON(fiber.Map{"ok": true, "session_log": getSessionLog(), "display_log": getDisplayLog()})
 	})
 
 	api.Post("/chat/revert-file", func(c *fiber.Ctx) error {
@@ -1592,13 +1653,15 @@ func setupConfigRoutes(api fiber.Router) {
 		cfg := loadCfg()
 
 		type providerInfo struct {
-			ID            string `json:"id"`
-			Model         string `json:"model"`
-			BaseURL       string `json:"base_url"`
-			APIKey        string `json:"api_key"`
-			DisableVision bool   `json:"disable_vision"`
-			ContextWindow int    `json:"context_window"`
-			MaxMessages   int    `json:"max_messages"`
+			ID            string  `json:"id"`
+			Model         string  `json:"model"`
+			BaseURL       string  `json:"base_url"`
+			APIKey        string  `json:"api_key"`
+			DisableVision bool    `json:"disable_vision"`
+			ContextWindow int     `json:"context_window"`
+			MaxMessages   int     `json:"max_messages"`
+			InputPrice    float64 `json:"input_price"`
+			OutputPrice   float64 `json:"output_price"`
 		}
 
 		providers := make([]providerInfo, 0)
@@ -1635,6 +1698,14 @@ func setupConfigRoutes(api fiber.Router) {
 			if pc.MaxMessages != nil {
 				mm = *pc.MaxMessages
 			}
+			inPrice := 0.0
+			if pc.InputPrice != nil {
+				inPrice = *pc.InputPrice
+			}
+			outPrice := 0.0
+			if pc.OutputPrice != nil {
+				outPrice = *pc.OutputPrice
+			}
 			providers = append(providers, providerInfo{
 				ID:            pid,
 				Model:         mdl,
@@ -1643,6 +1714,8 @@ func setupConfigRoutes(api fiber.Router) {
 				DisableVision: dv,
 				ContextWindow: cw,
 				MaxMessages:   mm,
+				InputPrice:    inPrice,
+				OutputPrice:   outPrice,
 			})
 		}
 
@@ -1705,13 +1778,15 @@ func setupConfigRoutes(api fiber.Router) {
 
 	api.Post("/config/llm", func(c *fiber.Ctx) error {
 		type provPayload struct {
-			ID            string `json:"id"`
-			Model         string `json:"model"`
-			APIKey        string `json:"api_key"`
-			BaseURL       string `json:"base_url"`
-			DisableVision bool   `json:"disable_vision"`
-			ContextWindow int    `json:"context_window"`
-			MaxMessages   int    `json:"max_messages"`
+			ID            string  `json:"id"`
+			Model         string  `json:"model"`
+			APIKey        string  `json:"api_key"`
+			BaseURL       string  `json:"base_url"`
+			DisableVision bool    `json:"disable_vision"`
+			ContextWindow int     `json:"context_window"`
+			MaxMessages   int     `json:"max_messages"`
+			InputPrice    float64 `json:"input_price"`
+			OutputPrice   float64 `json:"output_price"`
 		}
 		payload := new(struct {
 			Providers   []provPayload `json:"providers"`
@@ -1774,6 +1849,16 @@ func setupConfigRoutes(api fiber.Router) {
 					pCfg["max_messages"] = p.MaxMessages
 				} else {
 					delete(pCfg, "max_messages")
+				}
+				if p.InputPrice > 0 {
+					pCfg["input_price"] = p.InputPrice
+				} else {
+					delete(pCfg, "input_price")
+				}
+				if p.OutputPrice > 0 {
+					pCfg["output_price"] = p.OutputPrice
+				} else {
+					delete(pCfg, "output_price")
 				}
 
 				newProvMap[newID] = pCfg
@@ -2044,6 +2129,7 @@ func setupProjectRoutes(api fiber.Router) {
 			"created":     []projectEntry{project},
 			"project":     project,
 			"session_log": sessionLog,
+			"display_log": getDisplayLog(),
 		})
 	})
 
@@ -2100,6 +2186,7 @@ func setupProjectRoutes(api fiber.Router) {
 			"ok":          true,
 			"project":     projectEntry{Path: targetFolder, Label: filepath.Base(targetFolder)},
 			"session_log": sessionLog,
+			"display_log": getDisplayLog(),
 			"projects":    projects,
 		})
 	})
@@ -2132,7 +2219,7 @@ func setupProjectRoutes(api fiber.Router) {
 			eventsMu.Unlock()
 		}
 
-		return c.JSON(fiber.Map{"ok": true, "warning": warning, "session_log": []any{}})
+		return c.JSON(fiber.Map{"ok": true, "warning": warning, "session_log": []any{}, "display_log": []map[string]any{}})
 	})
 }
 
@@ -2808,15 +2895,17 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 			"workspace_changes": wsChanges,
 		}
 
-		for i := len(subSession.Messages) - 1; i >= 0; i-- {
-			if subSession.Messages[i].Role == "assistant" {
-				msg := &subSession.Messages[i]
+		msgs := subSession.GetHistory()
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "assistant" {
+				msg := msgs[i]
 				if msg.Metadata == nil {
 					msg.Metadata = make(map[string]any)
 				}
 				msg.Metadata["run_meta"] = runMeta
 				if subSession.Repo != nil {
 					subSession.Repo.UpdateMessageMetadata(msg.ID, msg.Metadata)
+					subSession.Repo.UpdateDisplayMessageMetadata(msg.ID, msg.Metadata)
 				}
 				break
 			}
@@ -2881,7 +2970,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 	sp.SnapHash = snapHash
 	var fullContent string
 
-	for i := 0; i < 50; i++ {
+	for i := 0; i < maxSubagentCycles; i++ {
 		debugLog("runSubEngine: cycle %d/50 starting", i)
 		select {
 		case <-ctx.Done():
@@ -3083,6 +3172,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					debugLog("runEngine: run_meta attached to msg %s with %d live_events", msg.ID, len(runEvents))
 					if activeSession.Repo != nil {
 						activeSession.Repo.UpdateMessageMetadata(msg.ID, msg.Metadata)
+						activeSession.Repo.UpdateDisplayMessageMetadata(msg.ID, msg.Metadata)
 					}
 					break
 				}
@@ -3159,7 +3249,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				if hasAction && cfg.Embedding != nil && cfg.Embedding.Enabled {
 					client := clientFromCfg(cfg)
 					if client != nil {
-						episodeJSON, err := session.ExtractExecutionEpisode(context.Background(), msgs, client)
+						episodeJSON, err := session.ExtractExecutionEpisode(context.Background(), msgs, client, activeSession)
 						if err == nil && episodeJSON != "" {
 							episodeID := fmt.Sprintf("exec-%d-%x", time.Now().Unix(), func() []byte { b := make([]byte, 4); rand.Read(b); return b }())
 							wspkg.EmbedChunk(ws, "execution", episodeID, 0, episodeJSON, cfg.Embedding, repo)
@@ -3201,7 +3291,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	var originalCtxWindow int
 
 	var i int
-	for i = 0; i < 150; i++ {
+	for i = 0; i < maxEngineCycles; i++ {
 		debugLog("runEngine: cycle %d/150 starting", i)
 	retryCycle:
 		select {
@@ -3335,9 +3425,10 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					case "usage":
 						if evt.Usage != nil && activeSession != nil {
 							activeSession.AddTokens(evt.Usage.InputTokens, evt.Usage.OutputTokens)
+							prompt, completion := activeSession.GetTokenTotals()
 							addLiveEvent("token_usage", map[string]any{
-								"total_prompt":     activeSession.PromptTokens,
-								"total_completion": activeSession.CompletionTokens,
+								"total_prompt":     prompt,
+								"total_completion": completion,
 							})
 							debugLog("runEngine: cycle %d token usage: prompt=%d completion=%d",
 								i, evt.Usage.InputTokens, evt.Usage.OutputTokens)
@@ -3360,6 +3451,9 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			cycleContent = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(cycleContent, "$1")
 			thoughtBuffer = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(thoughtBuffer, "$1")
 		}
+
+		// DeepSeek R1 produces <tool_calls> blocks in content alongside delta.ToolCalls; strip them
+		cycleContent = regexp.MustCompile(`(?is)<tool_calls>.*?</tool_calls>`).ReplaceAllString(cycleContent, "")
 
 		// Fix DeepSeek R1 random <think> omissions
 		if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
@@ -3453,6 +3547,9 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				cycleContent = regexp.MustCompile(`(?s)(<think>.*?</think>).*?<think>.*?</think>`).ReplaceAllString(cycleContent, "$1")
 			}
 
+			// DeepSeek R1 produces <tool_calls> blocks in content alongside delta.ToolCalls; strip them
+			cycleContent = regexp.MustCompile(`(?is)<tool_calls>.*?</tool_calls>`).ReplaceAllString(cycleContent, "")
+
 			// Fix DeepSeek R1 random <think> omissions
 			if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
 				cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
@@ -3475,6 +3572,14 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				}
 			}
 			toolCalls = append(toolCalls, resp.ToolCalls...)
+			if resp.Usage != nil && activeSession != nil {
+				activeSession.AddTokens(resp.Usage.InputTokens, resp.Usage.OutputTokens)
+				prompt, completion := activeSession.GetTokenTotals()
+				addLiveEvent("token_usage", map[string]any{
+					"total_prompt":     prompt,
+					"total_completion": completion,
+				})
+			}
 		}
 
 		assistantMsg := session.Message{
@@ -3530,21 +3635,21 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				"text":  execText,
 				"event": execText,
 			})
-			var beforeSnap map[string]int64
-			if tc.Name == "shell" && workspace != "" {
-				beforeSnap = util.TakeDirSnapshot(workspace)
-			}
+		var beforeSnap map[string]int64
+		if (tc.Name == "shell" || tc.Name == "apply_unified_patch") && workspace != "" {
+			beforeSnap = util.TakeDirSnapshot(workspace)
+		}
 
 			result := sp.ProcessToolCall(tc, activeSession, agentID)
 			debugLog("runEngine: tool %s result: error=%q output_len=%d", tc.Name, result.Error, len(result.Output))
 
-			if tc.Name == "shell" && workspace != "" {
-				afterSnap := util.TakeDirSnapshot(workspace)
-				changed := util.GetChangedFiles(beforeSnap, afterSnap)
-				for _, f := range changed {
-					agentModifiedFiles[f] = true
-				}
+		if (tc.Name == "shell" || tc.Name == "apply_unified_patch") && workspace != "" {
+			afterSnap := util.TakeDirSnapshot(workspace)
+			changed := util.GetChangedFiles(beforeSnap, afterSnap)
+			for _, f := range changed {
+				agentModifiedFiles[f] = true
 			}
+		}
 
 			if result.Error == "" {
 				if tc.Name == "write" || tc.Name == "edit" || tc.Name == "apply_patch" {
@@ -3607,6 +3712,24 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		reason = "iteration_limit_reached"
 	}
 
+	runMeta := map[string]any{
+		"live_events":       []map[string]any{},  // don't need live_events to be complete here
+		"duration_ms":       durationMs,
+		"workspace_changes": workspaceChanges,
+	}
+	if activeSession != nil {
+		for i := len(activeSession.Messages) - 1; i >= 0; i-- {
+			if activeSession.Messages[i].Role == "assistant" {
+				msg := &activeSession.Messages[i]
+				if msg.Metadata == nil {
+					msg.Metadata = make(map[string]any)
+				}
+				msg.Metadata["run_meta"] = runMeta
+				break
+			}
+		}
+	}
+
 	addLiveEvent("complete", map[string]any{
 		"response":          fullContent,
 		"reason":            reason,
@@ -3639,7 +3762,8 @@ func getPromptTokens() int {
 	s := activeSession
 	sessionMu.RUnlock()
 	if s != nil {
-		return s.PromptTokens
+		prompt, _ := s.GetTokenTotals()
+		return prompt
 	}
 	return 0
 }
@@ -3649,9 +3773,36 @@ func getCompletionTokens() int {
 	s := activeSession
 	sessionMu.RUnlock()
 	if s != nil {
-		return s.CompletionTokens
+		_, completion := s.GetTokenTotals()
+		return completion
 	}
 	return 0
+}
+
+func getModelInputPrice(cfg config.Config, model string) float64 {
+	if len(cfg.EnabledProviders) > 0 {
+		primaryID := cfg.EnabledProviders[0]
+		if pc, ok := cfg.Provider[primaryID]; ok && pc.InputPrice != nil {
+			return *pc.InputPrice
+		}
+	}
+	if info, ok := provider.ResolveModel(model); ok {
+		return info.CostInput
+	}
+	return 2.50
+}
+
+func getModelOutputPrice(cfg config.Config, model string) float64 {
+	if len(cfg.EnabledProviders) > 0 {
+		primaryID := cfg.EnabledProviders[0]
+		if pc, ok := cfg.Provider[primaryID]; ok && pc.OutputPrice != nil {
+			return *pc.OutputPrice
+		}
+	}
+	if info, ok := provider.ResolveModel(model); ok {
+		return info.CostOut
+	}
+	return 10.00
 }
 
 func pathSafe(fullPath, workspace string) bool {
@@ -3676,7 +3827,7 @@ func isAbsPathEqual(a, b string) bool {
 	return strings.EqualFold(aa, bb)
 }
 
-func isAbsPath(path, workspace string) bool {
+func isAbsPath(path string) bool {
 	return filepath.IsAbs(path)
 }
 
@@ -3743,14 +3894,19 @@ func createGitSnapshot(workspace string) string {
 	if err := cmd.Run(); err != nil {
 		return ""
 	}
-	// Try git stash create
+	// Try git stash create (creates dangling commit, does NOT modify working tree)
 	cmd = exec.Command("git", "stash", "create", "-m", "QuietForge Snapshot")
 	cmd.Dir = workspace
 	out, err := cmd.Output()
 	if err == nil && strings.TrimSpace(string(out)) != "" {
-		return strings.TrimSpace(string(out))
+		hash := strings.TrimSpace(string(out))
+		// Tag the stash commit to prevent Git GC from collecting it
+		tagCmd := exec.Command("git", "tag", "quietforge-"+hash, hash)
+		tagCmd.Dir = workspace
+		tagCmd.Run()
+		return hash
 	}
-	// Fallback to HEAD
+	// Fallback to HEAD (permanent commit, no GC risk)
 	cmd = exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = workspace
 	out, err = cmd.Output()

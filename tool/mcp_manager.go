@@ -370,48 +370,72 @@ func (m *McpManager) startMcpSession(ctx context.Context, srv McpServerDef, ws s
 }
 
 func (m *McpManager) callTool(ctx context.Context, serverName, toolName string, args map[string]any, ws string) (any, error) {
-	m.mu.Lock()
-	srvDef, ok := m.servers[serverName]
-	session := m.sessions[serverName]
-	currWs := m.sessionWs[serverName]
-	
-	if !ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("server %s not found", serverName)
-	}
+	for {
+		m.mu.Lock()
+		srvDef, ok := m.servers[serverName]
+		session := m.sessions[serverName]
+		currWs := m.sessionWs[serverName]
 
-	if session == nil || currWs != ws {
-		if session != nil {
-			log.Printf("MCP: Workspace changed for %s, restarting server...", serverName)
-			session.close()
-		}
-		
-		newSession, err := m.startMcpSession(context.Background(), srvDef, ws)
-		if err != nil {
+		if !ok {
 			m.mu.Unlock()
+			return nil, fmt.Errorf("server %s not found", serverName)
+		}
+
+		if session == nil || currWs != ws {
+			if session != nil {
+				log.Printf("MCP: Workspace changed for %s, restarting server...", serverName)
+				session.close()
+			}
+
+			newSession, err := m.startMcpSession(context.Background(), srvDef, ws)
+			if err != nil {
+				m.mu.Unlock()
+				return nil, err
+			}
+
+			m.sessions[serverName] = newSession
+			m.sessionWs[serverName] = ws
+			session = newSession
+			m.mu.Unlock()
+
+			result, err := session.call("tools/call", map[string]any{
+				"name":      toolName,
+				"arguments": args,
+			})
+			if err != nil {
+				m.mu.Lock()
+				if m.sessions[serverName] == session {
+					session.close()
+					delete(m.sessions, serverName)
+				}
+				m.mu.Unlock()
+				return nil, err
+			}
+			return result, nil
+		}
+		m.mu.Unlock()
+
+		result, err := session.call("tools/call", map[string]any{
+			"name":      toolName,
+			"arguments": args,
+		})
+		if err != nil {
+			m.mu.Lock()
+			// Only clean up if this is still the active session (not replaced by concurrent call)
+			if m.sessions[serverName] == session {
+				session.close()
+				delete(m.sessions, serverName)
+				delete(m.sessionWs, serverName)
+			}
+			m.mu.Unlock()
+			// If the session was stale (concurrently replaced), retry with the new session
+			if m.sessions[serverName] != session {
+				continue
+			}
 			return nil, err
 		}
-		
-		m.sessions[serverName] = newSession
-		m.sessionWs[serverName] = ws
-		session = newSession
+		return result, nil
 	}
-	m.mu.Unlock()
-
-	result, err := session.call("tools/call", map[string]any{
-		"name":      toolName,
-		"arguments": args,
-	})
-	if err != nil {
-		m.mu.Lock()
-		if m.sessions[serverName] == session {
-			session.close()
-			delete(m.sessions, serverName)
-		}
-		m.mu.Unlock()
-		return nil, err
-	}
-	return result, nil
 }
 
 func (m *McpManager) runServer(ctx context.Context, srv McpServerDef) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -44,6 +45,11 @@ func JailPath(workspaceRoot string, requestedPath string) (string, error) {
 	// Robust prefix check for Windows
 	lowerRoot := strings.ToLower(filepath.ToSlash(absRoot))
 	lowerReq := strings.ToLower(filepath.ToSlash(absRequested))
+
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		lowerRoot = filepath.ToSlash(absRoot)
+		lowerReq = filepath.ToSlash(absRequested)
+	}
 
 	// Ensure the boundary is strictly the directory, not a substring matching directory (e.g. /ws and /ws2)
 	if !strings.HasSuffix(lowerRoot, "/") {

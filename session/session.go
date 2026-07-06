@@ -168,6 +168,12 @@ func (s *Session) AddTokens(prompt, completion int) {
 	s.CompletionTokens += completion
 }
 
+func (s *Session) GetTokenTotals() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.PromptTokens, s.CompletionTokens
+}
+
 func (s *Session) Close() error {
 	return s.Save()
 }
@@ -232,6 +238,9 @@ func (s *Session) AddMessage(message Message) error {
 	if s.Repo != nil {
 		if !s.loaded {
 			if err := s.Save(); err != nil {
+				s.mu.Lock()
+				s.Messages = s.Messages[:len(s.Messages)-1]
+				s.mu.Unlock()
 				return err
 			}
 			s.loaded = true
@@ -268,7 +277,19 @@ func (s *Session) AddMessage(message Message) error {
 		}
 		if err := s.Repo.CreateMessage(msgRow, partRows); err != nil {
 			log.Printf("AddMessage: failed to persist message %s: %v", message.ID, err)
+			s.mu.Lock()
+			s.Messages = s.Messages[:len(s.Messages)-1]
+			s.mu.Unlock()
 			return err
+		}
+
+		partsJSON, _ := json.Marshal(message.Parts)
+		metaJSON := []byte("{}")
+		if message.Metadata != nil {
+			metaJSON, _ = json.Marshal(message.Metadata)
+		}
+		if err := s.Repo.AppendDisplayMessage(s.SessionID, message.ID, message.Role, string(partsJSON), string(metaJSON), message.CreatedAt); err != nil {
+			log.Printf("AddMessage: failed to append display_log for %s: %v", message.ID, err)
 		}
 	}
 	return nil

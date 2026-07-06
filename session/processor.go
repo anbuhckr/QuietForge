@@ -50,7 +50,7 @@ func (sp *SessionProcessor) ProcessToolCall(tc provider.ToolCall, session *Sessi
 		}
 	}
 	if !allowed {
-		return &tool.ToolResult{Output: fmt.Sprintf("Tool '%s' is not allowed for agent '%s'.", tc.Name, agentID), Error: "not_allowed"}
+		return &tool.ToolResult{Output: fmt.Sprintf("Tool '%s' is not available in plan mode. Switch to build mode to make changes.", tc.Name), Error: "not_allowed"}
 	}
 
 	t, err := sp.registry.GetTool(tc.Name)

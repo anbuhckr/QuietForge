@@ -93,8 +93,72 @@ func (r *Repository) UpdateMessageMetadata(messageID string, metadata map[string
 	return err
 }
 
+func (r *Repository) AppendDisplayMessage(sessionID, messageID, role, parts, metadata string, createdAt int64) error {
+	_, err := r.DB.Conn.Exec(
+		"INSERT INTO display_log (session_id, message_id, role, parts, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		sessionID, messageID, role, parts, metadata, createdAt,
+	)
+	return err
+}
+
+func (r *Repository) GetDisplayLog(sessionID string) ([]map[string]any, error) {
+	rows, err := r.DB.Conn.Query(`SELECT message_id, role, parts, metadata, created_at FROM display_log WHERE session_id = ? ORDER BY id ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]any
+	for rows.Next() {
+		var messageID, role, partsStr, metaStr string
+		var createdAt int64
+		if err := rows.Scan(&messageID, &role, &partsStr, &metaStr, &createdAt); err != nil {
+			return nil, err
+		}
+
+		var parts []any
+		if partsStr != "" {
+			json.Unmarshal([]byte(partsStr), &parts)
+		}
+		var meta map[string]any
+		if metaStr != "" {
+			json.Unmarshal([]byte(metaStr), &meta)
+		}
+
+		entry := map[string]any{
+			"id":         messageID,
+			"role":       role,
+			"parts":      parts,
+			"created_at": createdAt,
+		}
+		if meta != nil {
+			entry["metadata"] = meta
+			if snap, ok := meta["snapshot"]; ok {
+				entry["snapshot"] = snap
+			}
+			if runMeta, ok := meta["run_meta"]; ok {
+				entry["run_meta"] = runMeta
+			}
+		}
+		result = append(result, entry)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) UpdateDisplayMessageMetadata(messageID string, metadata map[string]any) error {
+	meta, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = r.DB.Conn.Exec("UPDATE display_log SET metadata = ? WHERE message_id = ?", string(meta), messageID)
+	return err
+}
+
 func (r *Repository) DeleteMessagesAfter(sessionID string, createdAt int64) error {
-	_, err := r.DB.Conn.Exec("DELETE FROM messages WHERE session_id = ? AND created_at >= ?", sessionID, createdAt)
+	if _, err := r.DB.Conn.Exec("DELETE FROM messages WHERE session_id = ? AND created_at >= ?", sessionID, createdAt); err != nil {
+		return err
+	}
+	_, err := r.DB.Conn.Exec("DELETE FROM display_log WHERE session_id = ? AND created_at >= ?", sessionID, createdAt)
 	return err
 }
 
@@ -221,7 +285,7 @@ func (r *Repository) ListTodos(sessionID string) ([]TodoRow, error) {
 			return nil, err
 		}
 		if completedAt.Valid {
-			t.Completedt = completedAt.Int64
+			t.CompletedAt = completedAt.Int64
 		}
 		todos = append(todos, t)
 	}

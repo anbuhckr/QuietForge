@@ -22,26 +22,39 @@ func (p *ArchitectureProvider) Gather(req ContextRequest) ([]ContextFragment, er
 		return nil, nil
 	}
 
-	rows, err := p.Repo.DB.Conn.Query("SELECT id, type, text FROM workspace_architecture WHERE workspace = ? AND scope = 'global'", req.Workspace)
+	decisions, err := p.Repo.ListArchitecture(req.Workspace, "decision")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	constraints, err := p.Repo.ListArchitecture(req.Workspace, "constraint")
+	if err != nil {
+		return nil, err
+	}
 
 	var fragments []ContextFragment
-	for rows.Next() {
-		var id, typ, text string
-		rows.Scan(&id, &typ, &text)
-		
+	for _, a := range decisions {
 		fragments = append(fragments, ContextFragment{
 			ProviderID: p.ID(),
-			ID:         fmt.Sprintf("arch:%s", id),
-			Priority:   100.0, // Global architecture is critical
+			ID:         fmt.Sprintf("arch:%s", a.ID),
+			Priority:   100.0,
 			Confidence: 1.0,
-			TokenCost:  len(text) / 4, // Rough token estimation
+			TokenCost:  len(a.Text) / 4,
 			Data: map[string]string{
-				"type": typ,
-				"text": text,
+				"type": "decision",
+				"text": a.Text,
+			},
+		})
+	}
+	for _, a := range constraints {
+		fragments = append(fragments, ContextFragment{
+			ProviderID: p.ID(),
+			ID:         fmt.Sprintf("arch:%s", a.ID),
+			Priority:   100.0,
+			Confidence: 1.0,
+			TokenCost:  len(a.Text) / 4,
+			Data: map[string]string{
+				"type": "constraint",
+				"text": a.Text,
 			},
 		})
 	}

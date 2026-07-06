@@ -2,7 +2,6 @@ package implement
 
 import (
 	"quietforge/tool"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -120,10 +119,7 @@ func (t *WebSearchTool) searchBasic(query string, num int, ctx *tool.ToolContext
 	searchUrl := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
 
 	// Short timeout for DDG; Wikipedia fallback handles the rest
-	insecureTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	ddgClient := &http.Client{Timeout: 5 * time.Second, Transport: insecureTransport}
+	ddgClient := &http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequestWithContext(ctx.Context, "GET", searchUrl, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36")
 
@@ -157,7 +153,7 @@ func (t *WebSearchTool) searchBasic(query string, num int, ctx *tool.ToolContext
 	wReq, _ := http.NewRequestWithContext(ctx.Context, "GET", wikiUrl, nil)
 	wReq.Header.Set("User-Agent", "QuietForgeBot/1.0 (https://github.com/quietforge; bot@quietforge.com)")
 
-	wikiClient := &http.Client{Timeout: 10 * time.Second, Transport: insecureTransport}
+	wikiClient := &http.Client{Timeout: 10 * time.Second}
 	wResp, wErr := wikiClient.Do(wReq)
 	if wErr == nil && wResp.StatusCode == 200 {
 		wBody, _ := io.ReadAll(wResp.Body)

@@ -28,6 +28,10 @@ const (
 	AgentSummary    = "summary"
 )
 
+var (
+	builtinAgentsMu sync.RWMutex
+)
+
 var BuiltinAgents = map[string]*AgentDefinition{
 	AgentBuild: {
 		ID:                   AgentBuild,
@@ -167,9 +171,12 @@ func SaveCustomAgent(workspace string, def *AgentDefinition) error {
 }
 
 func GetAgent(id string) *AgentDefinition {
+	builtinAgentsMu.RLock()
 	if agent, ok := BuiltinAgents[id]; ok {
+		builtinAgentsMu.RUnlock()
 		return agent
 	}
+	builtinAgentsMu.RUnlock()
 	customAgentsMu.RLock()
 	defer customAgentsMu.RUnlock()
 	if agent, ok := customAgents[id]; ok {

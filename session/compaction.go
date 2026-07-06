@@ -121,7 +121,8 @@ func SerializeMessage(msg Message, truncationLimit int) string {
 				)
 
 			case "compaction":
-				// Ignore.
+			// Skip compaction entries in message serialization -
+			// they are internal metadata, not displayed to the model.
 			}
 		}
 

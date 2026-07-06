@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"quietforge/storage"
 	"quietforge/tool"
 	"quietforge/util"
 )
+
+const maxEditFileSize = 10 * 1024 * 1024 // 10MB cap
 
 type EditTool struct{}
 
@@ -49,16 +52,42 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		return &tool.ToolResult{Error: "invalid_args", Output: err.Error()}, nil
 	}
 
+	hasOld := params.OldString != nil
+	hasStart := params.StartLine != nil
+	hasEnd := params.EndLine != nil
+
+	if hasOld && (hasStart || hasEnd) {
+		return &tool.ToolResult{
+			Error:  "invalid_args",
+			Output: "Specify either oldString or startLine/endLine, not both.",
+		}, nil
+	}
+
+	if hasStart != hasEnd {
+		return &tool.ToolResult{
+			Error:  "invalid_args",
+			Output: "Both startLine and endLine must be provided together.",
+		}, nil
+	}
+
 	pathStr, err := util.JailPath(ctx.Workspace, params.FilePath)
 	if err != nil {
 		return &tool.ToolResult{Error: "access_denied", Output: err.Error()}, nil
 	}
 
-	contentBytes, err := os.ReadFile(pathStr)
+	info, err := os.Stat(pathStr)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("File not found: %s", pathStr)}, nil
+			return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("File not found: %s", params.FilePath)}, nil
 		}
+		return &tool.ToolResult{Error: "read_error", Output: err.Error()}, nil
+	}
+	if info.Size() > maxEditFileSize {
+		return &tool.ToolResult{Error: "file_too_large", Output: fmt.Sprintf("File is too large (%d bytes). Maximum: %d bytes.", info.Size(), maxEditFileSize)}, nil
+	}
+
+	contentBytes, err := os.ReadFile(pathStr)
+	if err != nil {
 		return &tool.ToolResult{Error: "read_error", Output: err.Error()}, nil
 	}
 
@@ -66,15 +95,16 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 	hasCRLF := strings.Contains(content, "\r\n")
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	newString := strings.ReplaceAll(params.NewString, "\r\n", "\n")
-	newContent := ""
+
+	var newContent string
 	count := 0
 
-	if params.StartLine != nil && params.EndLine != nil {
+	if hasStart {
 		lines := splitLinesKeepEnds(content)
 		startLine := *params.StartLine
 		endLine := *params.EndLine
 
-		if startLine < 1 || endLine < startLine || startLine > len(lines) {
+		if startLine < 1 || endLine < startLine || startLine > len(lines) || endLine > len(lines) {
 			return &tool.ToolResult{Error: "invalid_args", Output: fmt.Sprintf("Invalid line range %d-%d for file with %d lines.", startLine, endLine, len(lines))}, nil
 		}
 
@@ -87,15 +117,26 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		}
 
 		newContent = prefix + strings.Join(newLines, "") + suffix
-		count = 1
-	} else if params.OldString != nil {
+		if newContent == content {
+			count = 0
+		} else {
+			count = 1
+		}
+	} else if hasOld {
+		if *params.OldString == "" {
+			return &tool.ToolResult{Error: "invalid_args", Output: "oldString cannot be empty."}, nil
+		}
 		old := strings.ReplaceAll(*params.OldString, "\r\n", "\n")
 		if params.ReplaceAll {
 			if !strings.Contains(content, old) {
 				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s", params.FilePath)}, nil
 			}
-			count = strings.Count(content, old)
 			newContent = strings.ReplaceAll(content, old, newString)
+			if newContent == content {
+				count = 0
+			} else {
+				count = strings.Count(content, old)
+			}
 		} else {
 			count = strings.Count(content, old)
 			if count > 1 {
@@ -105,44 +146,55 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s", params.FilePath)}, nil
 			}
 			newContent = strings.Replace(content, old, newString, 1)
-			count = 1
+			if newContent == content {
+				count = 0
+			} else {
+				count = 1
+			}
 		}
 	} else {
 		return &tool.ToolResult{Error: "invalid_args", Output: "Must provide either oldString OR (startLine and endLine)"}, nil
 	}
 
+	if count == 0 {
+		return &tool.ToolResult{Output: "No changes made. The replacement is identical to the original content."}, nil
+	}
+
 	if hasCRLF {
 		newContent = strings.ReplaceAll(newContent, "\n", "\r\n")
 	}
-	if err := os.WriteFile(pathStr, []byte(newContent), 0644); err != nil {
+
+	perm := info.Mode().Perm()
+	if err := atomicWriteFile(pathStr, []byte(newContent), perm); err != nil {
 		return &tool.ToolResult{Error: "write_error", Output: err.Error()}, nil
 	}
-	
+
 	if repo, ok := ctx.Extra["repo"].(*storage.Repository); ok && repo != nil {
 		tool.GlobalLspManager.NotifyFileChanged(ctx.Workspace, pathStr, newContent, repo)
 	}
 
+	relPath := pathStr
+	if r, err := filepath.Rel(ctx.Workspace, pathStr); err == nil {
+		relPath = r
+	}
+
 	s := ""
-	if count > 1 {
+	if count != 1 {
 		s = "s"
 	}
+
 	return &tool.ToolResult{
-		Title:  fmt.Sprintf("Edited %s (%d replacement%s)", pathStr, count, s),
-		Output: fmt.Sprintf("Applied %d change(s) to %s", count, pathStr),
+		Title:  fmt.Sprintf("Edited %s (%d replacement%s)", relPath, count, s),
+		Output: fmt.Sprintf("Applied %d change(s) to %s", count, relPath),
 	}, nil
 }
 
+// splitLinesKeepEnds splits a string into lines, preserving trailing newline
+// characters and empty lines (including a trailing empty line from a final \n).
 func splitLinesKeepEnds(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i+1])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
+	lines := strings.SplitAfter(s, "\n")
+	// strings.SplitAfter on "a\nb\n" produces ["a\n", "b\n"] — correct
+	// strings.SplitAfter on "a\nb" produces ["a\n", "b"] — correct
+	// strings.SplitAfter on "" produces [""] — correct for empty input
 	return lines
 }

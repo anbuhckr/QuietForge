@@ -16,13 +16,15 @@ type ModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Model         *string                `json:"model,omitempty"`
-	APIKey        *string                `json:"api_key,omitempty"`
-	BaseURL       *string                `json:"base_url,omitempty"`
-	DisableVision *bool                  `json:"disable_vision,omitempty"`
-	ContextWindow *int                   `json:"context_window,omitempty"`
-	MaxMessages   *int                   `json:"max_messages,omitempty"`
-	Options       map[string]any 		 `json:"options"`
+	Model         *string           `json:"model,omitempty"`
+	APIKey        *string           `json:"api_key,omitempty"`
+	BaseURL       *string           `json:"base_url,omitempty"`
+	DisableVision *bool             `json:"disable_vision,omitempty"`
+	ContextWindow *int              `json:"context_window,omitempty"`
+	MaxMessages   *int              `json:"max_messages,omitempty"`
+	InputPrice    *float64          `json:"input_price,omitempty"`
+	OutputPrice   *float64          `json:"output_price,omitempty"`
+	Options       map[string]any    `json:"options"`
 }
 
 // AgentConfig represents agent-specific configuration.

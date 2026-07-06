@@ -1,26 +1,30 @@
 package implement
 
 import (
-	"quietforge/tool"
-	"quietforge/util"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"quietforge/tool"
+	"quietforge/util"
+	wspkg "quietforge/workspace"
 	"strings"
+	"sync"
 
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/c"
-	"github.com/smacker/go-tree-sitter/cpp"
-	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/javascript"
-	"github.com/smacker/go-tree-sitter/python"
-	"github.com/smacker/go-tree-sitter/rust"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
+
+const (
+	astSearchMaxFiles   = 500
+	astSearchMaxResults = 100
+	snippetLines        = 10
+	maxASTFileSize      = 5 * 1024 * 1024 // 5MB
+)
+
+var errMaxFiles = errors.New("max files reached")
 
 type AstSearchTool struct{}
 
@@ -29,7 +33,7 @@ func (t *AstSearchTool) ID() string {
 }
 
 func (t *AstSearchTool) Description() string {
-	return "Semantic code search using Tree-sitter. Finds classes, functions, methods, and variables accurately across multiple languages. Excellent for resolving ReferenceError."
+	return "Semantic code search using Tree-sitter. Finds functions, methods, classes, structs, and interfaces across multiple languages."
 }
 
 func (t *AstSearchTool) Parameters() map[string]interface{} {
@@ -43,6 +47,68 @@ func (t *AstSearchTool) Parameters() map[string]interface{} {
 	}
 }
 
+// langInfo bundles everything we know about a supported language:
+// the tree-sitter Language and which node types define named entities.
+type langInfo struct {
+	Language *sitter.Language
+	DefKinds map[string]struct{}
+}
+
+// languageRegistry is the single source of truth for all supported extensions.
+// Both GetLanguage() and parseFileAST() read from this map.
+var languageRegistry = map[string]langInfo{
+	".py":   {wspkg.GetLanguage(".py"), map[string]struct{}{"function_definition": {}, "class_definition": {}}},
+	".js":   {wspkg.GetLanguage(".js"), map[string]struct{}{"function_declaration": {}, "class_declaration": {}, "method_definition": {}, "lexical_declaration": {}, "variable_declaration": {}, "variable_declarator": {}}},
+	".jsx":  {wspkg.GetLanguage(".jsx"), map[string]struct{}{"function_declaration": {}, "class_declaration": {}, "method_definition": {}, "lexical_declaration": {}, "variable_declaration": {}, "variable_declarator": {}}},
+	".ts":   {wspkg.GetLanguage(".ts"), map[string]struct{}{"function_declaration": {}, "class_declaration": {}, "method_definition": {}, "lexical_declaration": {}, "variable_declaration": {}, "variable_declarator": {}}},
+	".tsx":  {wspkg.GetLanguage(".tsx"), map[string]struct{}{"function_declaration": {}, "class_declaration": {}, "method_definition": {}, "lexical_declaration": {}, "variable_declaration": {}, "variable_declarator": {}}},
+	".go":   {wspkg.GetLanguage(".go"), map[string]struct{}{"function_declaration": {}, "method_declaration": {}, "type_spec": {}, "var_spec": {}, "const_spec": {}}},
+	".rs":   {wspkg.GetLanguage(".rs"), map[string]struct{}{"function_item": {}, "struct_item": {}, "impl_item": {}, "trait_item": {}}},
+	".java": {wspkg.GetLanguage(".java"), map[string]struct{}{"method_declaration": {}, "class_declaration": {}, "interface_declaration": {}}},
+	".c":    {wspkg.GetLanguage(".c"), map[string]struct{}{"function_definition": {}, "declaration": {}}},
+	".h":    {wspkg.GetLanguage(".h"), map[string]struct{}{"function_definition": {}, "declaration": {}}},
+	".cpp":  {wspkg.GetLanguage(".cpp"), map[string]struct{}{"function_definition": {}, "class_specifier": {}, "declaration": {}}},
+	".hpp":  {wspkg.GetLanguage(".hpp"), map[string]struct{}{"function_definition": {}, "class_specifier": {}, "declaration": {}}},
+}
+
+// supportedExtsSet is built once from languageRegistry at init time.
+var supportedExtsSet map[string]struct{}
+
+func init() {
+	supportedExtsSet = make(map[string]struct{}, len(languageRegistry))
+	for ext := range languageRegistry {
+		supportedExtsSet[ext] = struct{}{}
+	}
+}
+
+// perLanguageParsers is a sync.Pool keyed by file extension.
+// Each pool yields pre-configured parsers for a single language.
+// Thread-safe — multiple goroutines can Parse concurrently.
+var perLanguageParsers = map[string]*sync.Pool{}
+var parserRegistryMu sync.Mutex
+
+func getParserPool(ext string, lang *sitter.Language) *sync.Pool {
+	parserRegistryMu.Lock()
+	defer parserRegistryMu.Unlock()
+	if pool, ok := perLanguageParsers[ext]; ok {
+		return pool
+	}
+	pool := &sync.Pool{
+		New: func() any {
+			p := sitter.NewParser()
+			p.SetLanguage(lang)
+			return p
+		},
+	}
+	perLanguageParsers[ext] = pool
+	return pool
+}
+
+type astSearchParams struct {
+	SymbolName string `json:"symbolName"`
+	FilePath   string `json:"filePath"`
+}
+
 type astMatch struct {
 	FilePath  string
 	StartLine int
@@ -50,11 +116,15 @@ type astMatch struct {
 	Snippet   string
 }
 
+type astMatchJson struct {
+	File      string `json:"file"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Snippet   string `json:"snippet"`
+}
+
 func (t *AstSearchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult, error) {
-	var params struct {
-		SymbolName string `json:"symbolName"`
-		FilePath   string `json:"filePath"`
-	}
+	var params astSearchParams
 	if err := json.Unmarshal(args, &params); err != nil {
 		return &tool.ToolResult{Error: "invalid_args", Output: err.Error()}, nil
 	}
@@ -65,49 +135,87 @@ func (t *AstSearchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		return &tool.ToolResult{Error: "access_denied", Output: err.Error()}, nil
 	}
 
-	if _, err := os.Stat(searchPathStr); os.IsNotExist(err) {
+	info, err := os.Stat(searchPathStr)
+	if os.IsNotExist(err) {
 		return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("Path not found: %s", searchPathStr)}, nil
+	}
+	if err != nil {
+		return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("Cannot access path: %s", searchPathStr)}, nil
 	}
 
-	var filesToSearch []string
-	info, err := os.Stat(searchPathStr)
-	if err != nil {
-		return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("Path not found: %s", searchPathStr)}, nil
+	supExts := supportedExtsSet
+	skipDirs := map[string]struct{}{
+		"node_modules": {}, ".git": {}, ".venv": {}, "__pycache__": {},
+		".agent": {}, "dist": {}, "build": {}, "target": {}, "vendor": {},
 	}
+
+	// Collect files to search (capped at astSearchMaxFiles)
+	var filesToSearch []string
+
 	if !info.IsDir() {
-		filesToSearch = append(filesToSearch, searchPathStr)
-	} else {
-		supportedExts := map[string]bool{
-			".py": true, ".js": true, ".jsx": true, ".ts": true, ".tsx": true,
-			".go": true, ".rs": true, ".java": true, ".c": true, ".cpp": true,
-			".h": true, ".hpp": true,
+		ext := filepath.Ext(searchPathStr)
+		_, ok := supExts[ext]
+		if ok {
+			filesToSearch = append(filesToSearch, searchPathStr)
 		}
-		filepath.WalkDir(searchPathStr, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
+	} else {
+		walkErr := filepath.WalkDir(searchPathStr, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
 				return nil
 			}
+			// Check cancellation inside walk
+			select {
+			case <-ctx.Context.Done():
+				return ctx.Context.Err()
+			default:
+			}
 			if d.IsDir() {
-				base := d.Name()
-				if base == "node_modules" || base == ".git" || base == ".venv" || base == "__pycache__" || base == ".agent" {
+				_, isSkip := skipDirs[d.Name()]
+				if isSkip || strings.HasPrefix(d.Name(), ".") {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			ext := filepath.Ext(path)
-			if supportedExts[ext] {
+			_, ok := supExts[filepath.Ext(path)]
+			if ok {
+				if len(filesToSearch) >= astSearchMaxFiles {
+					return errMaxFiles
+				}
 				filesToSearch = append(filesToSearch, path)
 			}
 			return nil
 		})
+		if walkErr != nil && !errors.Is(walkErr, errMaxFiles) {
+			// Unexpected walk error — log for debugging but continue with partial results
+			if !errors.Is(walkErr, context.Canceled) && !errors.Is(walkErr, context.DeadlineExceeded) {
+				log.Printf("ast_search: walk error in %s: %v", searchPathStr, walkErr)
+			}
+		}
 	}
 
+	// Search files (cap results at astSearchMaxResults)
 	var matches []astMatch
 	for _, fpath := range filesToSearch {
-		m := parseFileAST(fpath, symbol)
+		select {
+		case <-ctx.Context.Done():
+			goto doneSearch
+		default:
+		}
+
+		if len(matches) >= astSearchMaxResults {
+			break
+		}
+
+		m := parseFileAST(ctx.Context, fpath, symbol)
 		if m != nil {
+			remaining := astSearchMaxResults - len(matches)
+			if len(m) > remaining {
+				m = m[:remaining]
+			}
 			matches = append(matches, m...)
 		}
 	}
+doneSearch:
 
 	if len(matches) == 0 {
 		return &tool.ToolResult{
@@ -115,13 +223,7 @@ func (t *AstSearchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		}, nil
 	}
 
-	type astMatchJson struct {
-		File      string `json:"file"`
-		StartLine int    `json:"start_line"`
-		EndLine   int    `json:"end_line"`
-		Snippet   string `json:"snippet"`
-	}
-	var jsonMatches []astMatchJson
+	jsonMatches := make([]astMatchJson, 0, len(matches))
 	for _, m := range matches {
 		relPath := m.FilePath
 		if ctx.Workspace != "" {
@@ -137,43 +239,36 @@ func (t *AstSearchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		})
 	}
 
-	if jsonMatches == nil {
-		jsonMatches = []astMatchJson{}
+	b, err := json.Marshal(jsonMatches)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal AST results: %w", err)
 	}
 
-	b, _ := json.Marshal(jsonMatches)
+	truncated := ""
+	if len(filesToSearch) >= astSearchMaxFiles {
+		truncated = fmt.Sprintf(" (capped at %d files)", astSearchMaxFiles)
+	}
 
 	return &tool.ToolResult{
-		Title:  fmt.Sprintf("AST Search: %s", symbol),
+		Title:  fmt.Sprintf("AST Search: %s%s", symbol, truncated),
 		Output: string(b),
 	}, nil
 }
 
 func GetLanguage(ext string) *sitter.Language {
-	switch ext {
-	case ".py":
-		return python.GetLanguage()
-	case ".js", ".jsx":
-		return javascript.GetLanguage()
-	case ".ts":
-		return typescript.GetLanguage()
-	case ".tsx":
-		return tsx.GetLanguage()
-	case ".go":
-		return golang.GetLanguage()
-	case ".rs":
-		return rust.GetLanguage()
-	case ".java":
-		return java.GetLanguage()
-	case ".c", ".h":
-		return c.GetLanguage()
-	case ".cpp", ".hpp":
-		return cpp.GetLanguage()
+	if info, ok := languageRegistry[ext]; ok {
+		return info.Language
 	}
 	return nil
 }
 
-func parseFileAST(path, symbol string) []astMatch {
+func parseFileAST(ctx context.Context, path, symbol string) []astMatch {
+	// Skip files over 5MB
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > maxASTFileSize {
+		return nil
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -181,14 +276,19 @@ func parseFileAST(path, symbol string) []astMatch {
 	content := string(data)
 	lines := strings.Split(content, "\n")
 
-	lang := GetLanguage(filepath.Ext(path))
-	if lang == nil {
+	ext := filepath.Ext(path)
+	langInfo, hasLang := languageRegistry[ext]
+	if !hasLang {
 		return nil
 	}
+	lang := langInfo.Language
+	kindSet := langInfo.DefKinds
 
-	parser := sitter.NewParser()
-	parser.SetLanguage(lang)
-	tree, err := parser.ParseCtx(context.Background(), nil, data)
+	pool := getParserPool(ext, lang)
+	parser := pool.Get().(*sitter.Parser)
+	defer pool.Put(parser)
+
+	tree, err := parser.ParseCtx(ctx, nil, data)
 	if err != nil || tree == nil {
 		return nil
 	}
@@ -197,33 +297,37 @@ func parseFileAST(path, symbol string) []astMatch {
 	root := tree.RootNode()
 	var matches []astMatch
 
-	var walk func(node *sitter.Node)
-	walk = func(node *sitter.Node) {
-		t := node.Type()
-		lt := strings.ToLower(t)
+	// Cursor traversal — depth-first, no recursion
+	cursor := sitter.NewTreeCursor(root)
+	defer cursor.Close()
 
-		// Look for definition/declaration nodes
-		isDef := strings.Contains(lt, "function") ||
-			strings.Contains(lt, "method") ||
-			strings.Contains(lt, "class") ||
-			strings.Contains(lt, "struct") ||
-			strings.Contains(lt, "interface") ||
-			strings.Contains(lt, "declaration") ||
-			strings.Contains(lt, "definition") ||
-			strings.Contains(lt, "declarator")
+	for {
+		// Check cancellation and max results
+		if len(matches) >= astSearchMaxResults {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return matches
+		default:
+		}
 
-		if isDef {
-			// Try to find the name field
+		node := cursor.CurrentNode()
+		if _, isDef := kindSet[node.Type()]; isDef {
 			nameNode := node.ChildByFieldName("name")
 			if nameNode == nil {
-				// Fallback: look for first identifier child
 				for i := 0; i < int(node.ChildCount()); i++ {
 					child := node.Child(i)
-					if child.Type() == "identifier" || child.Type() == "property_identifier" {
+					t := child.Type()
+					if t == "identifier" || t == "property_identifier" || t == "variable_declarator" {
 						nameNode = child
 						break
 					}
 				}
+			}
+			// For variable_declarator nodes, the name is the "name" field child
+			if nameNode == nil && node.Type() == "variable_declarator" {
+				nameNode = node.ChildByFieldName("name")
 			}
 
 			if nameNode != nil {
@@ -231,7 +335,7 @@ func parseFileAST(path, symbol string) []astMatch {
 				if nodeName == symbol {
 					startLine := int(node.StartPoint().Row) + 1
 					endLine := int(node.EndPoint().Row) + 1
-					snippetEnd := startLine + 9
+					snippetEnd := startLine + snippetLines - 1
 					if snippetEnd > endLine {
 						snippetEnd = endLine
 					}
@@ -249,12 +353,17 @@ func parseFileAST(path, symbol string) []astMatch {
 			}
 		}
 
-		for i := 0; i < int(node.ChildCount()); i++ {
-			walk(node.Child(i))
+		if cursor.GoToFirstChild() {
+			continue
+		}
+		for !cursor.GoToNextSibling() {
+			if !cursor.GoToParent() {
+				goto done
+			}
 		}
 	}
+done:
 
-	walk(root)
 	return matches
 }
 
