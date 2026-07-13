@@ -3,6 +3,7 @@ package implement
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -98,6 +99,12 @@ func (t *ShellTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 
 	if warn := validateCommand(params.Command); warn != "" {
 		return &tool.ToolResult{Error: fmt.Sprintf("Command rejected: %s", warn)}, nil
+	}
+
+	if ctx != nil && ctx.Agent == "plan" {
+		if warn := validatePlanCommand(params.Command); warn != "" {
+			return &tool.ToolResult{Error: fmt.Sprintf("Command rejected in plan mode: %s. Switch to build mode to edit files.", warn)}, nil
+		}
 	}
 
 	if params.Timeout == 0 {
@@ -308,8 +315,10 @@ func appendToActiveSession(msgContent string, ctx *tool.ToolContext) {
 	}
 	sessionID := s.SessionID
 
+	b := make([]byte, 4)
+	rand.Read(b)
 	msg := session.Message{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("msg-%d-%x", time.Now().UnixNano(), b),
 		SessionID: sessionID,
 		Role:      "system",
 		Parts: []session.MessagePart{
@@ -386,6 +395,71 @@ func validateCommand(cmd string) string {
 		}
 	}
 	return ""
+}
+
+func validatePlanCommand(cmd string) string {
+	low := strings.ToLower(strings.TrimSpace(cmd))
+
+	// Block: output redirect to file (not null devices or fd-to-fd)
+	if hasFileRedirect(low) {
+		return "output redirect to file"
+	}
+
+	// Block: PowerShell write cmdlets
+	writeCmdlets := []string{
+		"set-content ", "add-content ", "out-file ",
+		"new-item ", "copy-item ", "move-item ", "remove-item ",
+	}
+	for _, wc := range writeCmdlets {
+		if strings.Contains(low, wc) {
+			return "file modification command (" + strings.TrimSpace(wc) + ")"
+		}
+	}
+
+	// Block: sed -i (in-place edit)
+	lowParts := strings.Fields(low)
+	for i, part := range lowParts {
+		if part == "sed" {
+			for j := i + 1; j < len(lowParts) && j <= i+3; j++ {
+				if strings.HasPrefix(lowParts[j], "-i") {
+					return "in-place file edit (sed -i)"
+				}
+			}
+		}
+	}
+
+	// Block: heredoc combined with file redirect
+	if (strings.Contains(low, "@\"") || strings.Contains(low, "@'") || strings.Contains(low, "<<")) && hasFileRedirect(low) {
+		return "heredoc file write"
+	}
+
+	// Block: Start-Process spawning powershell to write files
+	if strings.Contains(low, "start-process") && strings.Contains(low, "powershell") {
+		return "self-modifying shell command"
+	}
+
+	return ""
+}
+
+func hasFileRedirect(cmd string) bool {
+	low := strings.ToLower(cmd)
+
+	// Remove null-device redirects
+	for _, n := range []string{"> $null", ">> $null", "> /dev/null", ">> /dev/null", "> nul", ">> nul", ">nul", ">>nul"} {
+		low = strings.ReplaceAll(low, n, " ")
+	}
+
+	// Scan for remaining `>`
+	for i := 0; i < len(low); i++ {
+		if low[i] == '>' {
+			// Skip fd-to-fd redirects like 2>&1
+			if i+1 < len(low) && low[i+1] == '&' {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func isShellOutputBinary(data []byte) bool {

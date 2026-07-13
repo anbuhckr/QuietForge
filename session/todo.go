@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"time"
@@ -35,8 +36,10 @@ func (m *TodoManager) Add(content, status string) (storage.TodoRow, error) {
 	if status == "" {
 		status = "pending"
 	}
+	b := make([]byte, 4)
+	rand.Read(b)
 	todo := storage.TodoRow{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("todo-%d-%x", time.Now().UnixNano(), b),
 		SessionID: m.SessionID,
 		Content:   content,
 		Status:    status,

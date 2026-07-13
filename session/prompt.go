@@ -106,11 +106,7 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 				case "cancelled":
 					marker = "[-]"
 				}
-				shortID := t.ID
-				if len(shortID) > 8 {
-					shortID = shortID[:8]
-				}
-				lines = append(lines, fmt.Sprintf("%s %s: %s", marker, shortID, t.Content))
+				lines = append(lines, fmt.Sprintf("%s %s: %s", marker, t.ID, t.Content))
 			}
 			todoStatus = "\n\n# Active Tasks / Todo List\n" + strings.Join(lines, "\n")
 		}

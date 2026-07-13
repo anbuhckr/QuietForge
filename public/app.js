@@ -356,10 +356,13 @@ class ConversationState {
     await this.render();
   }
 
-  async loadDb(displayLog) {
+  async loadDb(displayLog, clearDom = true) {
     const source = displayLog || [];
+    const oldTurns = [...this.turns];
     this.turns = [];
-    document.getElementById('chat').innerHTML = '';
+    if (clearDom) {
+      document.getElementById('chat').innerHTML = '';
+    }
     source.forEach(msg => {
       const role = String(msg.role || '').toLowerCase();
       const parts = msg.parts || [];
@@ -441,12 +444,19 @@ class ConversationState {
           turn.liveContainer.push({ think, tools });
         }
         
+        const oldTurn = oldTurns[this.turns.length - 1] || {};
+
         if (msg.run_meta && msg.run_meta.duration_ms) {
           turn.completed = true;
           turn.durationMs = msg.run_meta.duration_ms;
+        } else if (oldTurn.durationMs) {
+          turn.completed = oldTurn.completed;
+          turn.durationMs = oldTurn.durationMs;
         }
         if (msg.run_meta && msg.run_meta.workspace_changes) {
           turn.workspaceChanges = msg.run_meta.workspace_changes;
+        } else if (oldTurn.workspaceChanges) {
+          turn.workspaceChanges = oldTurn.workspaceChanges;
         }
       }
     });
@@ -496,6 +506,7 @@ class ConversationState {
       turn.completed = true;
       if (evt.duration_ms) turn.durationMs = evt.duration_ms;
       if (evt.workspace_changes) turn.workspaceChanges = evt.workspace_changes;
+      return;
     }
 
     requestAnimationFrame(async () => {
@@ -582,28 +593,28 @@ class ConversationState {
               return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
             });
             d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
-            
-            if (turn.snapshot && turn.messageId) {
-                const btn = document.createElement('button');
-                btn.className = 'revert-btn';
-                btn.title = 'Revert workspace to this point';
-                btn.textContent = '\u21B6';
-                btn.dataset.messageId = turn.messageId;
-                btn.onclick = async () => {
-                  const r = await fetch('/api/chat/revert', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({message_id: turn.messageId})
-                  });
-                  if (r.ok) {
-                    const data = await r.json();
-                    this.loadDb(data.display_log);
-                    await refresh(); 
-                  }
-                };
-                d.querySelector('.label').after(btn);
-            }
             turnGroup.appendChild(d);
             lastUserMsg = d; // update global pointer
+        }
+        
+        if (turn.snapshot && turn.messageId && !d.querySelector('.revert-btn')) {
+            const btn = document.createElement('button');
+            btn.className = 'revert-btn';
+            btn.title = 'Revert workspace to this point';
+            btn.textContent = '\u21B6';
+            btn.dataset.messageId = turn.messageId;
+            btn.onclick = async () => {
+              const r = await fetch('/api/chat/revert', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message_id: turn.messageId})
+              });
+              if (r.ok) {
+                const data = await r.json();
+                this.loadDb(data.display_log, true);
+                await refresh(); 
+              }
+            };
+            d.querySelector('.label').after(btn);
         }
       }
 
@@ -622,7 +633,7 @@ class ConversationState {
             const details = document.createElement('details');
             details.className = 'inline-live';
             
-            const sharedLogHtml = `<div class="compact-log live-log" style="margin-top:8px; padding-left:16px; display:flex; flex-direction:column; gap:4px; max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: #3f424b transparent;"></div>`;
+            const sharedLogHtml = `<div class="compact-log live-log" style="margin-top:8px; padding-left:16px; display:flex; flex-direction:column; gap:4px; max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: rgba(255,255,255,0.14) transparent;"></div>`;
             
             if (turn.completed) {
                 details.classList.add('live-compact');
@@ -649,16 +660,20 @@ class ConversationState {
             const isCompleted = turn.completed;
             const currentCompletedState = details.dataset.completedState === "true";
             
-            if (isCompleted && !currentCompletedState) {
-                details.classList.remove('flat-live');
-                details.classList.add('live-compact');
-                details.open = false;
+            if (isCompleted) {
+                if (!currentCompletedState) {
+                    details.classList.remove('flat-live');
+                    details.classList.add('live-compact');
+                    details.open = false;
+                    details.dataset.completedState = "true";
+                }
+                
+                // ALWAYS update duration text if it's completed, in case the value changed (e.g. from 1s to the real duration)
                 const durationTxt = this.formatRunDuration(turn.durationMs || 0);
                 const summary = details.querySelector('summary');
                 if (summary) {
                     summary.innerHTML = `<span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span>`;
                 }
-                details.dataset.completedState = "true";
             }
         }
 
@@ -810,8 +825,8 @@ async function compactLiveTranscript(durationMs) {
 function updateTimer() {
     conversationState.updateTimer();
 }
-async function renderSession(displayLog) {
-    await conversationState.loadDb(displayLog);
+async function renderSession(displayLog, clearDom = true) {
+    await conversationState.loadDb(displayLog, clearDom);
 }
 
 
@@ -849,12 +864,8 @@ async function setRunningState(isRunning, isStopping = false, backendStartTime =
       updateTimer();
     }
   } else if (!isRunning) {
-    const elapsedMs = runStartTime ? Date.now() - runStartTime : 0;
     clearInterval(runTimerInterval);
     runTimerInterval = null;
-    if (elapsedMs > 0) {
-        await compactLiveTranscript(elapsedMs);
-    }
     runStartTime = 0;
   }
 }
@@ -1092,7 +1103,9 @@ async function refresh() {
 
     if (a.projects !== undefined) await renderProjects(a.projects);
     if (firstStatus) {
-      await renderSession(a.display_log);
+      const isInitialLoad = document.getElementById('chat').children.length === 0 || 
+                           (document.getElementById('chat').children.length === 1 && document.getElementById('chat').children[0].classList.contains('system'));
+      await renderSession(a.display_log, isInitialLoad);
       firstStatus = false;
       if (a.running) {
         try {
@@ -1146,6 +1159,12 @@ async function refresh() {
       if (!_notifQueued) {
         _notifQueued = true;
         _playNotificationSound();
+      }
+      if (a.display_log) {
+        await renderSession(a.display_log, false);
+      }
+      if (typeof loadExplorerList === 'function' && typeof explorerPath !== 'undefined') {
+        loadExplorerList(explorerPath);
       }
     }
   } catch (e) {
@@ -1298,8 +1317,13 @@ async function handleAgentEvent(d, isHistory = false) {
      await setRunningState(false, false);
      firstStatus = true;
       if (!isHistory) {
+        // Wait 500ms for the backend to commit final db records (snapshot ID, run_meta)
+        await new Promise(r => setTimeout(r, 500));
         await refresh();
         await conversationState.render();
+        if (typeof loadExplorerList === 'function' && typeof explorerPath !== 'undefined') {
+          loadExplorerList(explorerPath);
+        }
       }
      return;
   }
@@ -1474,6 +1498,7 @@ async function send() {
     // Success path: SSE 'complete' handler handles cleanup.
     isSending = false;
     await refresh();
+    await conversationState.render();
   }
 }
 
@@ -2657,7 +2682,7 @@ const explorerTree = document.getElementById('explorerTree');
 const workspaceActions = document.getElementById('workspaceActions');
 const explorerActions = document.getElementById('explorerActions');
 const explorerActionsBottom = document.getElementById('explorerActionsBottom');
-const btnRefreshExplorer = document.getElementById('refreshExplorer');
+const btnEditExplorerItem = document.getElementById('editExplorerItem');
 const explorerListEl = document.getElementById('explorerList');
 const explorerBreadcrumbEl = document.getElementById('explorerBreadcrumb');
 const explorerBackBtn = document.getElementById('explorerBack');
@@ -2689,11 +2714,18 @@ if (tabWorkspaces && tabExplorer) {
   });
 }
 
-if (btnRefreshExplorer) {
-  btnRefreshExplorer.addEventListener('click', (e) => {
+if (btnEditExplorerItem) {
+  btnEditExplorerItem.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    loadExplorerList(explorerPath);
+    if (!explorerSelection) return alert('Select a file to edit');
+    const el = document.querySelector('.explorer-item[data-path="' + CSS.escape(explorerSelection) + '"]');
+    const isDir = el && el.getAttribute('data-type') === 'dir';
+    if (isDir) {
+      alert('Cannot edit a directory. Please select a file.');
+    } else {
+      openWorkspaceFile(explorerSelection);
+    }
   });
 }
 
@@ -2709,7 +2741,9 @@ if (explorerBackBtn) {
 
 async function loadExplorerList(path) {
   if (!explorerListEl) return;
-  explorerListEl.innerHTML = '<div style="color:var(--text-muted); padding:10px;">Loading...</div>';
+  if (path !== explorerPath || !explorerListEl.innerHTML.trim()) {
+    explorerListEl.innerHTML = '<div style="color:var(--text-muted); padding:10px;">Loading...</div>';
+  }
   try {
     const res = await fetch('/api/workspace/list?path=' + encodeURIComponent(path));
     if (!res.ok) throw new Error('Failed to load');

@@ -244,7 +244,9 @@ func isEngineRunning() bool {
 var pendingToolApprovals sync.Map
 
 func askPermissionCallback(toolName, toolInput, agentID string) (bool, error) {
-	callID := fmt.Sprintf("%d", time.Now().UnixNano())
+	b := make([]byte, 4)
+	rand.Read(b)
+	callID := fmt.Sprintf("perm-%d-%x", time.Now().UnixNano(), b)
 	ch := make(chan bool, 1)
 	pendingToolApprovals.Store(callID, ch)
 	defer pendingToolApprovals.Delete(callID)
@@ -737,7 +739,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.0.9")
+		fmt.Println("QuietForge v1.1.0")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -3652,13 +3654,31 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 
 			if result.Error == "" {
-				if tc.Name == "write" || tc.Name == "edit" || tc.Name == "apply_patch" {
+				if tc.Name == "write" || tc.Name == "edit" {
 					var args map[string]any
 					if err := json.Unmarshal([]byte(tc.Arguments), &args); err == nil {
 						if fp, ok := args["filePath"].(string); ok && workspace != "" {
 							if jailed, err := util.JailPath(workspace, fp); err == nil {
 								if rel, err := filepath.Rel(workspace, jailed); err == nil {
 									agentModifiedFiles[filepath.ToSlash(rel)] = true
+								}
+							}
+						}
+					}
+				}
+				if tc.Name == "apply_patch" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Arguments), &args); err == nil {
+						if patches, ok := args["patches"].([]interface{}); ok {
+							for _, p := range patches {
+								if patch, ok := p.(map[string]interface{}); ok {
+									if fp, ok := patch["filePath"].(string); ok && workspace != "" {
+										if jailed, err := util.JailPath(workspace, fp); err == nil {
+											if rel, err := filepath.Rel(workspace, jailed); err == nil {
+												agentModifiedFiles[filepath.ToSlash(rel)] = true
+											}
+										}
+									}
 								}
 							}
 						}
@@ -4159,7 +4179,9 @@ func recordDiagnostics(repo *storage.Repository, workspace string, source string
 		for _, match := range matches {
 			if len(match) > 1 {
 				symName := match[1]
-				id := fmt.Sprintf("%d", time.Now().UnixNano())
+				b := make([]byte, 4)
+				rand.Read(b)
+				id := fmt.Sprintf("diag-%d-%x", time.Now().UnixNano(), b)
 				repo.DB.Conn.Exec(
 					"INSERT INTO workspace_diagnostics (id, workspace, path, symbol, source, status, severity, message, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 					id, workspace, "unknown", symName, source, "active", "error", fmt.Sprintf("undefined: %s", symName), time.Now().Unix(),

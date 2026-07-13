@@ -69,7 +69,7 @@ var BuiltinAgents = map[string]*AgentDefinition{
 			"read":        "allowed",
 			"grep":        "allowed",
 			"glob":        "allowed",
-			"shell":       "allowed",
+			"shell":       "prompt",
 			"webfetch":    "allowed",
 			"websearch":   "allowed",
 			"invoke_subagent": "allowed",

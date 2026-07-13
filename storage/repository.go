@@ -209,7 +209,7 @@ func (r *Repository) GetMessageParts(messageID string) ([]MessagePartRow, error)
 
 func (r *Repository) CreateTodo(todo TodoRow) error {
 	_, err := r.DB.Conn.Exec(
-		"INSERT INTO todos (id, session_id, content, status, created_at) VALUES (?, ?, ?, ?, ?)",
+		"INSERT OR IGNORE INTO todos (id, session_id, content, status, created_at) VALUES (?, ?, ?, ?, ?)",
 		todo.ID, todo.SessionID, todo.Content, todo.Status, todo.CreatedAt,
 	)
 	return err

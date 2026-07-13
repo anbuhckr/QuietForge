@@ -1,6 +1,7 @@
 package implement
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -136,7 +137,9 @@ func (t *WorkspaceTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		if params.Scope == "" {
 			params.Scope = "global"
 		}
-		id := fmt.Sprintf("%d", time.Now().UnixNano())
+		b := make([]byte, 4)
+		rand.Read(b)
+		id := fmt.Sprintf("arch-%d-%x", time.Now().UnixNano(), b)
 		arch := storage.ArchitectureRow{
 			ID:        id,
 			Workspace: ctx.Workspace,

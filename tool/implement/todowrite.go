@@ -1,6 +1,7 @@
 package implement
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -60,7 +61,9 @@ func (t *TodoWriteTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		if params.Content == "" {
 			return &tool.ToolResult{Error: "missing_arg", Output: "Content is required"}, nil
 		}
-		id := fmt.Sprintf("%d", time.Now().UnixNano())
+		b := make([]byte, 4)
+		rand.Read(b)
+		id := fmt.Sprintf("todo-%d-%x", time.Now().UnixNano(), b)
 		todo := storage.TodoRow{
 			ID:        id,
 			SessionID: ctx.SessionID,
@@ -80,11 +83,7 @@ func (t *TodoWriteTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 		if err := repo.UpdateTodo(params.TodoID, map[string]any{"status": params.Status}); err != nil {
 			return &tool.ToolResult{Error: "update_error", Output: fmt.Sprintf("Failed to update todo: %v", err)}, nil
 		}
-		shortID := params.TodoID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		return &tool.ToolResult{Output: fmt.Sprintf("Todo %s -> %s", shortID, params.Status)}, nil
+		return &tool.ToolResult{Output: fmt.Sprintf("Todo %s -> %s", params.TodoID, params.Status)}, nil
 
 	case "list":
 		todos, err := repo.ListTodos(ctx.SessionID)
@@ -104,11 +103,7 @@ func (t *TodoWriteTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolR
 			case "cancelled":
 				m = "[-]"
 			}
-			shortID := td.ID
-			if len(shortID) > 8 {
-				shortID = shortID[:8]
-			}
-			lines += fmt.Sprintf("%s %s %s\n", m, shortID, td.Content)
+			lines += fmt.Sprintf("%s %s %s\n", m, td.ID, td.Content)
 		}
 		return &tool.ToolResult{Title: fmt.Sprintf("Todos (%d)", len(todos)), Output: lines}, nil
 	}

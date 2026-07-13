@@ -21,6 +21,16 @@
 
 * { box-sizing: border-box; }
 button:disabled { opacity: 0.3 !important; cursor: not-allowed !important; }
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.14) transparent;
+}
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
 html, body {
   height: 100%; margin: 0;
   background-color: var(--bg-base);
@@ -927,11 +937,11 @@ code.hljs {
     background: transparent;
 }
 .live-log::-webkit-scrollbar-thumb {
-    background: #3f424b;
+    background: rgba(255,255,255,0.14);
     border-radius: 3px;
 }
 .live-log::-webkit-scrollbar-thumb:hover {
-    background: #565a66;
+    background: rgba(255,255,255,0.22);
 }
 
 /* Better Diff Styling */
