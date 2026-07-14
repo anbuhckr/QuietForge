@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	PermissionDeniedMessage = "Operation denied by user."
-	DoomLoopThreshold       = 3
+	PermissionDeniedMessage = "Permission denied."
 )
 
 type AskPermissionFn func(toolName, toolInput, agentID string) (bool, error)
@@ -50,7 +49,7 @@ func (sp *SessionProcessor) ProcessToolCall(tc provider.ToolCall, session *Sessi
 		}
 	}
 	if !allowed {
-		return &tool.ToolResult{Output: fmt.Sprintf("Tool '%s' is not available in plan mode. Switch to build mode to make changes.", tc.Name), Error: "not_allowed"}
+		return &tool.ToolResult{Output: fmt.Sprintf("Tool '%s' is not available in %s mode. Switch to build mode to make changes.", tc.Name, agentID), Error: "not_allowed"}
 	}
 
 	t, err := sp.registry.GetTool(tc.Name)
@@ -109,7 +108,3 @@ func (sp *SessionProcessor) checkPermission(toolName, toolInput, agentID string)
 	return "allowed"
 }
 
-func (sp *SessionProcessor) DetectDoomLoop(toolName string, args map[string]any, session *Session) bool {
-	count := session.CountRecentToolCalls(toolName, args, DoomLoopThreshold)
-	return count >= DoomLoopThreshold
-}

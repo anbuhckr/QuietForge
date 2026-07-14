@@ -44,10 +44,11 @@ type AgentConfig struct {
 
 // EmbeddingConfig holds settings for semantic retrieval
 type EmbeddingConfig struct {
-	Enabled bool    `json:"enabled"`
-	Model   *string `json:"model,omitempty"`
-	APIKey  *string `json:"api_key,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
+	Enabled  bool    `json:"enabled"`
+	Model    *string `json:"model,omitempty"`
+	APIKey   *string `json:"api_key,omitempty"`
+	BaseURL  *string `json:"base_url,omitempty"`
+	BrainDir *string `json:"brain_dir,omitempty"`
 }
 
 // CompactionConfig handles conversation history management.

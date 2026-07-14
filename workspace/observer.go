@@ -42,9 +42,14 @@ func (o *Observer) Stop() {
 }
 
 func (o *Observer) Emit(eventType, workspace, path string) {
-	// Filter
-	if strings.Contains(path, ".git") || strings.Contains(path, ".agent") || strings.Contains(path, "node_modules") {
+	if strings.Contains(path, ".git") || strings.Contains(path, "node_modules") {
 		return
+	}
+	// Allow markdown files in .agent for Brain indexing, ignore the rest (like sessions.db)
+	if strings.Contains(path, ".agent") {
+		if !strings.HasSuffix(path, ".md") {
+			return
+		}
 	}
 	
 	// Ensure path is relative to workspace for consistency, or absolute. We use whatever the Engine uses (which is jail path usually)

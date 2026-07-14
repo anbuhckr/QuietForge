@@ -278,7 +278,14 @@ func askPermissionCallback(toolName, toolInput, agentID string) (bool, error) {
 func buildToolSchemas(agentID string) []map[string]any {
 	allowed := agent.GetAgentTools(agentID)
 	var schemas []map[string]any
+	
+	cfg := config.LoadConfig(workspaceDir)
+	embeddingEnabled := cfg.Embedding != nil && cfg.Embedding.Enabled
+
 	for _, t := range toolRegistry.GetAll() {
+		if t.ID() == "semantic_search" && !embeddingEnabled {
+			continue
+		}
 		if agent.IsToolAllowed(t.ID(), allowed) {
 			schemas = append(schemas, map[string]any{
 				"type": "function",
@@ -296,7 +303,14 @@ func buildToolSchemas(agentID string) []map[string]any {
 func buildOpenAIToolDefs(agentID string) []openai.Tool {
 	allowed := agent.GetAgentTools(agentID)
 	var tools []openai.Tool
+	
+	cfg := config.LoadConfig(workspaceDir)
+	embeddingEnabled := cfg.Embedding != nil && cfg.Embedding.Enabled
+	
 	for _, t := range toolRegistry.GetAll() {
+		if t.ID() == "semantic_search" && !embeddingEnabled {
+			continue
+		}
 		if agent.IsToolAllowed(t.ID(), allowed) {
 			tools = append(tools, openai.Tool{
 				Type: "function",
@@ -739,7 +753,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.0")
+		fmt.Println("QuietForge v1.1.1")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1023,6 +1037,7 @@ func registerTools() {
 		&impl.SkillTool{},
 		&impl.LspTool{},
 		&impl.AstSearchTool{},
+		&impl.SemanticSearchTool{},
 		&impl.RevertTool{},
 		&impl.PlanExitTool{},
 		&impl.DefineSubagentTool{},
@@ -2441,7 +2456,13 @@ func setupWorkspaceRoutes(api fiber.Router) {
 			relPath = strings.ReplaceAll(relPath, "\\", "/")
 			results = append(results, map[string]any{
 				"name": entry.Name(),
-				"type": func() string { if entry.IsDir() { return "dir" } else { return "file" } }(),
+				"type": func() string {
+					if entry.IsDir() {
+						return "dir"
+					} else {
+						return "file"
+					}
+				}(),
 				"path": relPath,
 			})
 		}
@@ -3086,34 +3107,189 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 			break
 		}
 
+		isBatchReadOnly := true
 		for _, tc := range toolCalls {
-			result := sp.ProcessToolCall(tc, subSession, agentID)
+			if !isReadOnlyTool(tc.Name) {
+				isBatchReadOnly = false
+				break
+			}
+		}
 
-			resMsg := session.Message{
-				ID:        generateMsgID(),
-				SessionID: subSession.SessionID,
-				Role:      "tool",
-				CreatedAt: time.Now().UnixMilli(),
+		if isBatchReadOnly && len(toolCalls) > 1 {
+			debugLog("runSubEngine: executing %d read-only tools concurrently", len(toolCalls))
+
+			results := make([]*tool.ToolResult, len(toolCalls))
+			var wg sync.WaitGroup
+
+			var beforeSnap map[string]int64
+			if workspace != "" {
+				beforeSnap = util.TakeDirSnapshot(workspace)
 			}
 
-			if result.Error != "" && result.Output == "" {
-				resMsg.Parts = append(resMsg.Parts, session.MessagePart{
-					Type:        "tool_result",
-					ToolCallID:  tc.ID,
-					ToolName:    tc.Name,
-					Content:     fmt.Sprintf("Error: %s", result.Error),
-					Attachments: result.Attachments,
-				})
-			} else {
-				resMsg.Parts = append(resMsg.Parts, session.MessagePart{
-					Type:        "tool_result",
-					ToolCallID:  tc.ID,
-					ToolName:    tc.Name,
-					Content:     result.Output,
-					Attachments: result.Attachments,
-				})
+			for i, tc := range toolCalls {
+				wg.Add(1)
+				go func(idx int, call provider.ToolCall) {
+					defer wg.Done()
+					res := sp.ProcessToolCall(call, subSession, agentID)
+					results[idx] = res
+				}(i, tc)
 			}
-			subSession.AddMessage(resMsg)
+			wg.Wait()
+
+			var batchedDiffStr string
+			var hasTrackedChanges bool
+			var trackedFiles []string
+			if workspace != "" {
+				afterSnap := util.TakeDirSnapshot(workspace)
+				changed := util.GetChangedFiles(beforeSnap, afterSnap)
+
+				if len(changed) > 0 && (agentID == agent.AgentPlan || agentID == agent.AgentExplore) {
+					for _, f := range changed {
+						if util.IsFileTracked(workspace, f) {
+							hasTrackedChanges = true
+							trackedFiles = append(trackedFiles, f)
+						} else {
+							agentModifiedFiles[f] = true
+						}
+					}
+
+					if hasTrackedChanges {
+						args := []string{"diff", "--"}
+						args = append(args, trackedFiles...)
+						diffCmd := exec.Command("git", args...)
+						diffCmd.Dir = workspace
+						diffOut, _ := diffCmd.Output()
+						batchedDiffStr = string(diffOut)
+						if len(batchedDiffStr) > 2000 {
+							batchedDiffStr = batchedDiffStr[:2000] + "\n...[diff truncated]..."
+						}
+
+						snapManager := util.NewSnapshotManager(workspace)
+						for _, f := range trackedFiles {
+							snapManager.RestoreFile(snapHash, f)
+						}
+					}
+				} else {
+					for _, f := range changed {
+						agentModifiedFiles[f] = true
+					}
+				}
+			}
+
+			for i, tc := range toolCalls {
+				res := results[i]
+				if hasTrackedChanges {
+					res.Error = "read_only_violation"
+					errorMsg := fmt.Sprintf("\n\n--- READ-ONLY ENGINE LOCK TRIGGERED ---\nYour tool successfully executed, but it modified tracked project files. Since you are in a read-only mode (Plan/Explore), your modifications were automatically REVERTED.\n\nSTOP TRYING TO EDIT FILES! You are in an analysis mode. Just analyze the result and give your response to the user. If you actually need to continue implementing changes, ask the user to switch you to 'build' mode.\n\nFor your observation, here is the diff of the changes that were reverted:\n```diff\n%s\n```", batchedDiffStr)
+					res.Output = res.Output + errorMsg
+				}
+
+				resMsg := session.Message{
+					ID:        generateMsgID(),
+					SessionID: subSession.SessionID,
+					Role:      "tool",
+					CreatedAt: time.Now().UnixMilli(),
+				}
+
+				if res.Error != "" && res.Output == "" {
+					resMsg.Parts = append(resMsg.Parts, session.MessagePart{
+						Type:        "tool_result",
+						ToolCallID:  tc.ID,
+						ToolName:    tc.Name,
+						Content:     fmt.Sprintf("Error: %s", res.Error),
+						Attachments: res.Attachments,
+					})
+				} else {
+					resMsg.Parts = append(resMsg.Parts, session.MessagePart{
+						Type:        "tool_result",
+						ToolCallID:  tc.ID,
+						ToolName:    tc.Name,
+						Content:     res.Output,
+						Attachments: res.Attachments,
+					})
+				}
+				subSession.AddMessage(resMsg)
+			}
+		} else {
+			for _, tc := range toolCalls {
+				var beforeSnap map[string]int64
+				if workspace != "" {
+					beforeSnap = util.TakeDirSnapshot(workspace)
+				}
+
+				result := sp.ProcessToolCall(tc, subSession, agentID)
+
+				if workspace != "" {
+					afterSnap := util.TakeDirSnapshot(workspace)
+					changed := util.GetChangedFiles(beforeSnap, afterSnap)
+
+					if len(changed) > 0 && (agentID == agent.AgentPlan || agentID == agent.AgentExplore) {
+						hasTrackedChanges := false
+						var trackedFiles []string
+
+						for _, f := range changed {
+							if util.IsFileTracked(workspace, f) {
+								hasTrackedChanges = true
+								trackedFiles = append(trackedFiles, f)
+							} else {
+								agentModifiedFiles[f] = true
+							}
+						}
+
+						if hasTrackedChanges {
+							// Capture the diff of what changed before reverting
+							args := []string{"diff", "--"}
+							args = append(args, trackedFiles...)
+							diffCmd := exec.Command("git", args...)
+							diffCmd.Dir = workspace
+							diffOut, _ := diffCmd.Output()
+							diffStr := string(diffOut)
+							if len(diffStr) > 2000 {
+								diffStr = diffStr[:2000] + "\n...[diff truncated]..."
+							}
+
+							// ZERO-TRUST ENGINE LOCK: Revert tracked changes instantly.
+							snapManager := util.NewSnapshotManager(workspace)
+							for _, f := range trackedFiles {
+								snapManager.RestoreFile(snapHash, f)
+							}
+
+							result.Error = "read_only_violation"
+							errorMsg := fmt.Sprintf("\n\n--- READ-ONLY ENGINE LOCK TRIGGERED ---\nYour tool successfully executed, but it modified tracked project files. Since you are in a read-only mode (Plan/Explore), your modifications were automatically REVERTED.\n\nSTOP TRYING TO EDIT FILES! You are in an analysis mode. Just analyze the result and give your response to the user. If you actually need to continue implementing changes, ask the user to switch you to 'build' mode.\n\nFor your observation, here is the diff of the changes that were reverted:\n```diff\n%s\n```", diffStr)
+							result.Output = result.Output + errorMsg
+						}
+					} else {
+						for _, f := range changed {
+							agentModifiedFiles[f] = true
+						}
+					}
+				}
+				resMsg := session.Message{
+					ID:        generateMsgID(),
+					SessionID: subSession.SessionID,
+					Role:      "tool",
+					CreatedAt: time.Now().UnixMilli(),
+				}
+
+				if result.Error != "" && result.Output == "" {
+					resMsg.Parts = append(resMsg.Parts, session.MessagePart{
+						Type:        "tool_result",
+						ToolCallID:  tc.ID,
+						ToolName:    tc.Name,
+						Content:     fmt.Sprintf("Error: %s", result.Error),
+						Attachments: result.Attachments,
+					})
+				} else {
+					resMsg.Parts = append(resMsg.Parts, session.MessagePart{
+						Type:        "tool_result",
+						ToolCallID:  tc.ID,
+						ToolName:    tc.Name,
+						Content:     result.Output,
+						Attachments: result.Attachments,
+					})
+				}
+				subSession.AddMessage(resMsg)
+			}
 		}
 		subSession.Save()
 	}
@@ -3352,6 +3528,8 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 		if i == 0 {
 			originalCtxWindow = ctxWindow
+			// Allow frontend UI to fully establish SSE connection before we emit 'Compacting memory'
+			time.Sleep(500 * time.Millisecond)
 		}
 
 		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
@@ -3620,97 +3798,218 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			break
 		}
 
+		isBatchReadOnly := true
 		for _, tc := range toolCalls {
-			debugLog("runEngine: executing tool %s args=%.60s", tc.Name, tc.Arguments)
-			select {
-			case <-ctx.Done():
-				debugLog("runEngine: tool %s cancelled mid-execution", tc.Name)
-				addLiveEvent("complete", map[string]any{"reason": "cancelled", "response": fullContent})
-				activeSession.Save()
-				return
-			default:
-			}
-
-			argsStr := formatToolSummary(tc.Name, tc.Arguments)
-			execText := fmt.Sprintf("Executing: %s %s", tc.Name, argsStr)
-			addLiveEvent("action", map[string]any{
-				"text":  execText,
-				"event": execText,
-			})
-		var beforeSnap map[string]int64
-		if (tc.Name == "shell" || tc.Name == "apply_unified_patch") && workspace != "" {
-			beforeSnap = util.TakeDirSnapshot(workspace)
-		}
-
-			result := sp.ProcessToolCall(tc, activeSession, agentID)
-			debugLog("runEngine: tool %s result: error=%q output_len=%d", tc.Name, result.Error, len(result.Output))
-
-		if (tc.Name == "shell" || tc.Name == "apply_unified_patch") && workspace != "" {
-			afterSnap := util.TakeDirSnapshot(workspace)
-			changed := util.GetChangedFiles(beforeSnap, afterSnap)
-			for _, f := range changed {
-				agentModifiedFiles[f] = true
+			if !isReadOnlyTool(tc.Name) {
+				isBatchReadOnly = false
+				break
 			}
 		}
 
-			if result.Error == "" {
-				if tc.Name == "write" || tc.Name == "edit" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Arguments), &args); err == nil {
-						if fp, ok := args["filePath"].(string); ok && workspace != "" {
-							if jailed, err := util.JailPath(workspace, fp); err == nil {
-								if rel, err := filepath.Rel(workspace, jailed); err == nil {
-									agentModifiedFiles[filepath.ToSlash(rel)] = true
-								}
-							}
-						}
-					}
-				}
-				if tc.Name == "apply_patch" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Arguments), &args); err == nil {
-						if patches, ok := args["patches"].([]interface{}); ok {
-							for _, p := range patches {
-								if patch, ok := p.(map[string]interface{}); ok {
-									if fp, ok := patch["filePath"].(string); ok && workspace != "" {
-										if jailed, err := util.JailPath(workspace, fp); err == nil {
-											if rel, err := filepath.Rel(workspace, jailed); err == nil {
-												agentModifiedFiles[filepath.ToSlash(rel)] = true
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			if result.Error != "" {
-				addLiveEvent("action", map[string]any{
-					"text":  fmt.Sprintf("✗ %s: %.300s", tc.Name, result.Output),
-					"event": fmt.Sprintf("✗ %s: %.300s", tc.Name, result.Output),
-				})
-			} else {
-				addLiveEvent("action", map[string]any{
-					"text":  fmt.Sprintf("✓ %s", tc.Name),
-					"event": fmt.Sprintf("✓ %s", tc.Name),
-				})
+		if isBatchReadOnly && len(toolCalls) > 1 {
+			debugLog("runEngine: executing %d read-only tools concurrently", len(toolCalls))
+
+			results := make([]*tool.ToolResult, len(toolCalls))
+			var wg sync.WaitGroup
+
+			var beforeSnap map[string]int64
+			if workspace != "" {
+				beforeSnap = util.TakeDirSnapshot(workspace)
 			}
 
-			resultMsg := session.Message{
-				ID:        generateMsgID(),
-				SessionID: activeSession.SessionID,
-				Role:      "tool",
-				CreatedAt: time.Now().UnixMilli(),
+			for i, tc := range toolCalls {
+				wg.Add(1)
+				go func(idx int, call provider.ToolCall) {
+					defer wg.Done()
+					debugLog("runEngine: concurrently executing tool %s args=%.60s", call.Name, call.Arguments)
+
+					argsStr := formatToolSummary(call.Name, call.Arguments)
+					execText := fmt.Sprintf("Executing: %s %s", call.Name, argsStr)
+					addLiveEvent("action", map[string]any{
+						"text":  execText,
+						"event": execText,
+					})
+
+					res := sp.ProcessToolCall(call, activeSession, agentID)
+					results[idx] = res
+					debugLog("runEngine: concurrent tool %s result: error=%q output_len=%d", call.Name, res.Error, len(res.Output))
+				}(i, tc)
 			}
-			resultMsg.Parts = append(resultMsg.Parts, session.MessagePart{
-				Type:        "tool_result",
-				ToolCallID:  tc.ID,
-				ToolName:    tc.Name,
-				Content:     result.Output,
-				Attachments: result.Attachments,
-			})
-			activeSession.AddMessage(resultMsg)
+			wg.Wait()
+
+			var batchedDiffStr string
+			var hasTrackedChanges bool
+			var trackedFiles []string
+			if workspace != "" {
+				afterSnap := util.TakeDirSnapshot(workspace)
+				changed := util.GetChangedFiles(beforeSnap, afterSnap)
+
+				if len(changed) > 0 && (agentID == agent.AgentPlan || agentID == agent.AgentExplore) {
+					for _, f := range changed {
+						if util.IsFileTracked(workspace, f) {
+							hasTrackedChanges = true
+							trackedFiles = append(trackedFiles, f)
+						} else {
+							agentModifiedFiles[f] = true
+						}
+					}
+
+					if hasTrackedChanges {
+						args := []string{"diff", "--"}
+						args = append(args, trackedFiles...)
+						diffCmd := exec.Command("git", args...)
+						diffCmd.Dir = workspace
+						diffOut, _ := diffCmd.Output()
+						batchedDiffStr = string(diffOut)
+						if len(batchedDiffStr) > 2000 {
+							batchedDiffStr = batchedDiffStr[:2000] + "\n...[diff truncated]..."
+						}
+
+						snapManager := util.NewSnapshotManager(workspace)
+						for _, f := range trackedFiles {
+							snapManager.RestoreFile(snapHash, f)
+						}
+					}
+				} else {
+					for _, f := range changed {
+						agentModifiedFiles[f] = true
+					}
+				}
+			}
+
+			for i, tc := range toolCalls {
+				res := results[i]
+				if hasTrackedChanges {
+					res.Error = "read_only_violation"
+					errorMsg := fmt.Sprintf("\n\n--- READ-ONLY ENGINE LOCK TRIGGERED ---\nYour tool successfully executed, but it modified tracked project files. Since you are in a read-only mode (Plan/Explore), your modifications were automatically REVERTED.\n\nSTOP TRYING TO EDIT FILES! You are in an analysis mode. Just analyze the result and give your response to the user. If you actually need to continue implementing changes, ask the user to switch you to 'build' mode.\n\nFor your observation, here is the diff of the changes that were reverted:\n```diff\n%s\n```", batchedDiffStr)
+					res.Output = res.Output + errorMsg
+				}
+
+				if res.Error != "" {
+					addLiveEvent("action", map[string]any{
+						"text":  fmt.Sprintf("✗ %s: %.300s", tc.Name, res.Output),
+						"event": fmt.Sprintf("✗ %s: %.300s", tc.Name, res.Output),
+					})
+				} else {
+					addLiveEvent("action", map[string]any{
+						"text":  fmt.Sprintf("✓ %s", tc.Name),
+						"event": fmt.Sprintf("✓ %s", tc.Name),
+					})
+				}
+
+				resultMsg := session.Message{
+					ID:        generateMsgID(),
+					SessionID: activeSession.SessionID,
+					Role:      "tool",
+					CreatedAt: time.Now().UnixMilli(),
+				}
+				resultMsg.Parts = append(resultMsg.Parts, session.MessagePart{
+					Type:        "tool_result",
+					ToolCallID:  tc.ID,
+					ToolName:    tc.Name,
+					Content:     res.Output,
+					Attachments: res.Attachments,
+				})
+				activeSession.AddMessage(resultMsg)
+			}
+		} else {
+			for _, tc := range toolCalls {
+				debugLog("runEngine: executing tool %s args=%.60s", tc.Name, tc.Arguments)
+				select {
+				case <-ctx.Done():
+					debugLog("runEngine: tool %s cancelled mid-execution", tc.Name)
+					addLiveEvent("complete", map[string]any{"reason": "cancelled", "response": fullContent})
+					activeSession.Save()
+					return
+				default:
+				}
+
+				argsStr := formatToolSummary(tc.Name, tc.Arguments)
+				execText := fmt.Sprintf("Executing: %s %s", tc.Name, argsStr)
+				addLiveEvent("action", map[string]any{
+					"text":  execText,
+					"event": execText,
+				})
+				var beforeSnap map[string]int64
+				if workspace != "" {
+					beforeSnap = util.TakeDirSnapshot(workspace)
+				}
+
+				result := sp.ProcessToolCall(tc, activeSession, agentID)
+				debugLog("runEngine: tool %s result: error=%q output_len=%d", tc.Name, result.Error, len(result.Output))
+
+				if workspace != "" {
+					afterSnap := util.TakeDirSnapshot(workspace)
+					changed := util.GetChangedFiles(beforeSnap, afterSnap)
+
+					if len(changed) > 0 && (agentID == agent.AgentPlan || agentID == agent.AgentExplore) {
+						hasTrackedChanges := false
+						var trackedFiles []string
+
+						for _, f := range changed {
+							if util.IsFileTracked(workspace, f) {
+								hasTrackedChanges = true
+								trackedFiles = append(trackedFiles, f)
+							} else {
+								agentModifiedFiles[f] = true
+							}
+						}
+
+						if hasTrackedChanges {
+							// Capture the diff of what changed before reverting
+							args := []string{"diff", "--"}
+							args = append(args, trackedFiles...)
+							diffCmd := exec.Command("git", args...)
+							diffCmd.Dir = workspace
+							diffOut, _ := diffCmd.Output()
+							diffStr := string(diffOut)
+							if len(diffStr) > 2000 {
+								diffStr = diffStr[:2000] + "\n...[diff truncated]..."
+							}
+
+							// ZERO-TRUST ENGINE LOCK: Revert tracked changes instantly.
+							snapManager := util.NewSnapshotManager(workspace)
+							for _, f := range trackedFiles {
+								snapManager.RestoreFile(snapHash, f)
+							}
+
+							result.Error = "read_only_violation"
+							errorMsg := fmt.Sprintf("\n\n--- READ-ONLY ENGINE LOCK TRIGGERED ---\nYour tool successfully executed, but it modified tracked project files. Since you are in a read-only mode (Plan/Explore), your modifications were automatically REVERTED.\n\nSTOP TRYING TO EDIT FILES! You are in an analysis mode. Just analyze the result and give your response to the user. If you actually need to continue implementing changes, ask the user to switch you to 'build' mode.\n\nFor your observation, here is the diff of the changes that were reverted:\n```diff\n%s\n```", diffStr)
+							result.Output = result.Output + errorMsg
+						}
+					} else {
+						for _, f := range changed {
+							agentModifiedFiles[f] = true
+						}
+					}
+				}
+				if result.Error != "" {
+					addLiveEvent("action", map[string]any{
+						"text":  fmt.Sprintf("✗ %s: %.300s", tc.Name, result.Output),
+						"event": fmt.Sprintf("✗ %s: %.300s", tc.Name, result.Output),
+					})
+				} else {
+					addLiveEvent("action", map[string]any{
+						"text":  fmt.Sprintf("✓ %s", tc.Name),
+						"event": fmt.Sprintf("✓ %s", tc.Name),
+					})
+				}
+
+				resultMsg := session.Message{
+					ID:        generateMsgID(),
+					SessionID: activeSession.SessionID,
+					Role:      "tool",
+					CreatedAt: time.Now().UnixMilli(),
+				}
+				resultMsg.Parts = append(resultMsg.Parts, session.MessagePart{
+					Type:        "tool_result",
+					ToolCallID:  tc.ID,
+					ToolName:    tc.Name,
+					Content:     result.Output,
+					Attachments: result.Attachments,
+				})
+				activeSession.AddMessage(resultMsg)
+			}
 		}
 	}
 
@@ -3733,7 +4032,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	}
 
 	runMeta := map[string]any{
-		"live_events":       []map[string]any{},  // don't need live_events to be complete here
+		"live_events":       []map[string]any{}, // don't need live_events to be complete here
 		"duration_ms":       durationMs,
 		"workspace_changes": workspaceChanges,
 	}
@@ -4267,4 +4566,13 @@ func copyDir(src, dest string) error {
 		}
 	}
 	return nil
+}
+
+func isReadOnlyTool(name string) bool {
+	switch name {
+	case "read", "glob", "ast_search", "websearch", "webfetch", "grep", "semantic_search":
+		return true
+	default:
+		return false
+	}
 }

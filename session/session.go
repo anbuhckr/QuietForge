@@ -308,46 +308,4 @@ func (s *Session) GetHistory(limit ...int) []Message {
 	return msgs
 }
 
-func (s *Session) CountRecentToolCalls(toolName string, args map[string]any, threshold int) int {
-	if threshold == 0 {
-		threshold = 3
-	}
-	count := 0
-	s.mu.Lock()
-	start := len(s.Messages) - 20
-	if start < 0 {
-		start = 0
-	}
-	for i := len(s.Messages) - 1; i >= start; i-- {
-		msg := s.Messages[i]
-		if msg.Role == "assistant" {
-			for _, part := range msg.Parts {
-				if part.Type == "tool_use" && part.ToolName == toolName {
-					var partArgs map[string]any
-					if s, ok := part.Arguments.(string); ok {
-						json.Unmarshal([]byte(s), &partArgs)
-					} else if m, ok := part.Arguments.(map[string]any); ok {
-						partArgs = m
-					}
-					if equalArgs(partArgs, args) {
-						count++
-					}
-				}
-			}
-		}
-	}
-	s.mu.Unlock()
-	return count
-}
 
-func equalArgs(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || v != bv {
-			return false
-		}
-	}
-	return true
-}

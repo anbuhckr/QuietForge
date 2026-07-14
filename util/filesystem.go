@@ -134,3 +134,10 @@ func GetChangedFiles(before, after map[string]int64) []string {
 	}
 	return changed
 }
+
+func IsFileTracked(workspace, file string) bool {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", file)
+	cmd.Dir = workspace
+	err := cmd.Run()
+	return err == nil
+}
