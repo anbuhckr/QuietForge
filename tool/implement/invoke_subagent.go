@@ -7,7 +7,7 @@ import (
 )
 
 type InvokeSubagentTool struct {
-	SpawnFunc func(prompt, agentType, parentSessionID string) (sessionID string, err error)
+	SpawnFunc func(prompt, agentType, parentSessionID string) (sessionID string, reportChan <-chan string, err error)
 }
 
 func (t *InvokeSubagentTool) ID() string {
@@ -15,7 +15,7 @@ func (t *InvokeSubagentTool) ID() string {
 }
 
 func (t *InvokeSubagentTool) Description() string {
-	return "Invokes a subagent to run asynchronously in the background. Use this for massive tasks."
+	return "Invokes a subagent to run in the background. Waits for them to complete. Use this for massive tasks."
 }
 
 func (t *InvokeSubagentTool) Parameters() map[string]interface{} {
@@ -58,24 +58,36 @@ func (t *InvokeSubagentTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.
 		return &tool.ToolResult{Error: "invalid_args", Output: "No subagents specified"}, nil
 	}
 
+	type waitTask struct {
+		sessionID string
+		agentType string
+		ch        <-chan string
+	}
+	var waits []waitTask
 	var results []string
+
 	for i, req := range params.Subagents {
 		agentType := req.SubagentType
 		if agentType == "" {
 			agentType = "build"
 		}
 
-		sessionID, err := t.SpawnFunc(req.Prompt, agentType, ctx.SessionID)
+		sessionID, ch, err := t.SpawnFunc(req.Prompt, agentType, ctx.SessionID)
 		if err != nil {
 			results = append(results, fmt.Sprintf("[%d] Failed to spawn subagent (type: %s): %v", i, agentType, err))
 		} else {
-			results = append(results, fmt.Sprintf("[%d] Subagent spawned successfully (type: %s, Session ID: %s). It is running asynchronously.", i, agentType, sessionID))
+			waits = append(waits, waitTask{sessionID: sessionID, agentType: agentType, ch: ch})
 		}
+	}
+
+	for _, w := range waits {
+		report := <-w.ch
+		results = append(results, fmt.Sprintf("=== Subagent %s (%s) Report ===\n%s", w.sessionID, w.agentType, report))
 	}
 
 	finalOutput := ""
 	for _, res := range results {
-		finalOutput += res + "\n"
+		finalOutput += res + "\n\n"
 	}
 
 	return &tool.ToolResult{

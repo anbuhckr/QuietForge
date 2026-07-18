@@ -26,7 +26,7 @@ func (t *ApplyPatchTool) ID() string {
 }
 
 func (t *ApplyPatchTool) Description() string {
-	return "Apply a unified diff patch to the codebase."
+	return "Apply a unified diff patch to the codebase. Ensure the diff format is strictly correct."
 }
 
 func (t *ApplyPatchTool) Parameters() map[string]interface{} {
@@ -200,7 +200,7 @@ func (t *SearchReplaceTool) ID() string {
 }
 
 func (t *SearchReplaceTool) Description() string {
-	return "Apply SEARCH/REPLACE blocks to modify files. Each block must have exact matching SEARCH text."
+	return "Apply SEARCH/REPLACE blocks to modify files. Each block must have EXACT character matching SEARCH text, including indentation and newlines."
 }
 
 func (t *SearchReplaceTool) Parameters() map[string]interface{} {
@@ -301,7 +301,7 @@ func (t *SearchReplaceTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.T
 			normalizedSearch := strings.ReplaceAll(op.search, "\r\n", "\n")
 			count := strings.Count(working, normalizedSearch)
 			if count == 0 {
-				results = append(results, fmt.Sprintf("Block %d: SEARCH text not found in %s", op.idx, pathStr))
+				results = append(results, fmt.Sprintf("Block %d: SEARCH text not found in %s. ERROR: The exact character-sequence was not found. This is almost always caused by incorrect indentation, missing trailing whitespace, or hallucinated lines in your SEARCH block. Do not guess the whitespace. Use a read tool with line numbers to get the EXACT text.", op.idx, pathStr))
 				fileFailed = true
 				break
 			}

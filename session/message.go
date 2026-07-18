@@ -168,6 +168,40 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 			continue
 		}
 
+		// 2.5 Merge consecutive user messages
+		if msg.Role == "user" && len(sanitized) > 0 && sanitized[len(sanitized)-1].Role == "user" {
+			prev := &sanitized[len(sanitized)-1]
+			if len(prev.MultiContent) > 0 || len(msg.MultiContent) > 0 {
+				var merged []openai.ChatMessagePart
+				if len(prev.MultiContent) > 0 {
+					merged = append(merged, prev.MultiContent...)
+				} else if prev.Content != "" {
+					merged = append(merged, openai.ChatMessagePart{
+						Type: openai.ChatMessagePartTypeText,
+						Text: prev.Content,
+					})
+					prev.Content = ""
+				}
+				
+				if len(msg.MultiContent) > 0 {
+					merged = append(merged, msg.MultiContent...)
+				} else if msg.Content != "" {
+					merged = append(merged, openai.ChatMessagePart{
+						Type: openai.ChatMessagePartTypeText,
+						Text: "\n\n" + msg.Content,
+					})
+				}
+				prev.MultiContent = merged
+			} else {
+				if prev.Content != "" && msg.Content != "" {
+					prev.Content += "\n\n" + msg.Content
+				} else if msg.Content != "" {
+					prev.Content = msg.Content
+				}
+			}
+			continue
+		}
+
 		sanitized = append(sanitized, msg)
 	}
 
@@ -179,6 +213,30 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 			} else {
 				sanitized[i].Content = " " // Single space satisfies strict schema validators
 			}
+		}
+	}
+
+	// 4. Global safety net for Jinja templates (like Qwen) that strictly require a user message
+	hasValidUser := false
+	for _, msg := range sanitized {
+		if msg.Role == "user" {
+			hasValidUser = true
+			break
+		}
+	}
+	
+	if !hasValidUser {
+		dummyUser := openai.ChatCompletionMessage{
+			Role:    "user",
+			Content: "[System auto-recovery]: Previous conversation context was truncated due to context limits. Please continue your task based on the current visible context.",
+		}
+		
+		if len(sanitized) > 0 && sanitized[0].Role == "system" {
+			// Insert after system
+			sanitized = append(sanitized[:1], append([]openai.ChatCompletionMessage{dummyUser}, sanitized[1:]...)...)
+		} else {
+			// Prepend
+			sanitized = append([]openai.ChatCompletionMessage{dummyUser}, sanitized...)
 		}
 	}
 

@@ -268,6 +268,26 @@ func parseConfig(data map[string]any) Config {
 		cfg.SSLPort = &p
 	}
 
+	if embedRaw, ok := data["embedding"].(map[string]any); ok {
+		var ec EmbeddingConfig
+		if enabled, ok := embedRaw["enabled"].(bool); ok {
+			ec.Enabled = enabled
+		}
+		if model, ok := embedRaw["model"].(string); ok && model != "" {
+			ec.Model = &model
+		}
+		if apiKey, ok := embedRaw["api_key"].(string); ok && apiKey != "" {
+			ec.APIKey = &apiKey
+		}
+		if baseURL, ok := embedRaw["base_url"].(string); ok && baseURL != "" {
+			ec.BaseURL = &baseURL
+		}
+		if brainDir, ok := embedRaw["brain_dir"].(string); ok && brainDir != "" {
+			ec.BrainDir = &brainDir
+		}
+		cfg.Embedding = &ec
+	}
+
 	return cfg
 }
 
@@ -401,6 +421,23 @@ func configToDict(cfg Config) map[string]any {
 	}
 	if len(cfg.Mode) > 0 {
 		d["mode"] = cfg.Mode
+	}
+	if cfg.Embedding != nil {
+		embedMap := make(map[string]any)
+		embedMap["enabled"] = cfg.Embedding.Enabled
+		if cfg.Embedding.Model != nil {
+			embedMap["model"] = *cfg.Embedding.Model
+		}
+		if cfg.Embedding.APIKey != nil {
+			embedMap["api_key"] = *cfg.Embedding.APIKey
+		}
+		if cfg.Embedding.BaseURL != nil {
+			embedMap["base_url"] = *cfg.Embedding.BaseURL
+		}
+		if cfg.Embedding.BrainDir != nil {
+			embedMap["brain_dir"] = *cfg.Embedding.BrainDir
+		}
+		d["embedding"] = embedMap
 	}
 	if cfg.Mcp != nil {
 		mcpMap := make(map[string]any)

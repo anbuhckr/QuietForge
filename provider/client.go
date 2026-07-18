@@ -124,7 +124,7 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 			err = callErr
 
 			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") || strings.Contains(errStr, "messages parameter") {
+			if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") {
 				return nil, fmt.Errorf("context window exceeded: %w", err)
 			}
 			if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid api key") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many") {
@@ -259,6 +259,9 @@ func (c *Client) Stream(ctx context.Context, messages []openai.ChatCompletionMes
 		MaxTokens:   16384,
 		Temperature: 0.0,
 		Stream:      true,
+		StreamOptions: &openai.StreamOptions{
+			IncludeUsage: true,
+		},
 	}
 	if len(tools) > 0 {
 		req.Tools = tools

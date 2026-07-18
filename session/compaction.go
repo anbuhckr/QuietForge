@@ -389,13 +389,18 @@ CRITICAL: Keep descriptions and tasks extremely short and concise (e.g. single-l
 		return PruneMessages(messages, config, targetTokens)
 	}
 
-	cleanJson := strings.TrimPrefix(newSummary, "```json")
-	cleanJson = strings.TrimPrefix(cleanJson, "```")
-	cleanJson = strings.TrimSuffix(cleanJson, "```")
-	cleanJson = strings.TrimSpace(cleanJson)
+	if idx := strings.LastIndex(newSummary, "</think>"); idx != -1 {
+		newSummary = strings.TrimSpace(newSummary[idx+len("</think>"):])
+	}
+
+	startIdx := strings.Index(newSummary, "{")
+	endIdx := strings.LastIndex(newSummary, "}")
+	if startIdx != -1 && endIdx != -1 && startIdx < endIdx {
+		newSummary = newSummary[startIdx : endIdx+1]
+	}
 
 	var parsed map[string]any
-	if err := json.Unmarshal([]byte(cleanJson), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(newSummary), &parsed); err != nil {
 		return PruneMessages(messages, config, targetTokens)
 	}
 

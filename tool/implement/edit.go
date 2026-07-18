@@ -21,7 +21,7 @@ func (t *EditTool) ID() string {
 }
 
 func (t *EditTool) Description() string {
-	return "Edit an existing file using either exact string replacement (oldString) OR exact line-range replacement (startLine, endLine). Line-range is highly recommended to avoid whitespace mismatch errors."
+	return "Edit an existing file using either exact string replacement (oldString) OR exact line-range replacement (startLine, endLine). Line-range (startLine/endLine) is HIGHLY RECOMMENDED to avoid strict whitespace mismatch errors which often cause tool loops."
 }
 
 func (t *EditTool) Parameters() map[string]interface{} {
@@ -129,7 +129,7 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		old := strings.ReplaceAll(*params.OldString, "\r\n", "\n")
 		if params.ReplaceAll {
 			if !strings.Contains(content, old) {
-				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s", params.FilePath)}, nil
+				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s. ERROR: Your oldString must exactly match the file character-for-character including whitespace and indentation. Do not hallucinate or guess whitespace! If you are struggling, use line-range (startLine/endLine) replacement instead, which is much more reliable.", params.FilePath)}, nil
 			}
 			newContent = strings.ReplaceAll(content, old, newString)
 			if newContent == content {
@@ -143,7 +143,7 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 				return &tool.ToolResult{Error: "multiple_matches", Output: fmt.Sprintf("Found %d matches. Use replaceAll or provide more context.", count)}, nil
 			}
 			if count == 0 {
-				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s", params.FilePath)}, nil
+				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s. ERROR: Your oldString must exactly match the file character-for-character including whitespace and indentation. Do not hallucinate or guess whitespace! If you are struggling, use line-range (startLine/endLine) replacement instead, which is much more reliable.", params.FilePath)}, nil
 			}
 			newContent = strings.Replace(content, old, newString, 1)
 			if newContent == content {

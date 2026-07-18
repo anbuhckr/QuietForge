@@ -278,7 +278,7 @@ func askPermissionCallback(toolName, toolInput, agentID string) (bool, error) {
 func buildToolSchemas(agentID string) []map[string]any {
 	allowed := agent.GetAgentTools(agentID)
 	var schemas []map[string]any
-	
+
 	cfg := config.LoadConfig(workspaceDir)
 	embeddingEnabled := cfg.Embedding != nil && cfg.Embedding.Enabled
 
@@ -303,10 +303,10 @@ func buildToolSchemas(agentID string) []map[string]any {
 func buildOpenAIToolDefs(agentID string) []openai.Tool {
 	allowed := agent.GetAgentTools(agentID)
 	var tools []openai.Tool
-	
+
 	cfg := config.LoadConfig(workspaceDir)
 	embeddingEnabled := cfg.Embedding != nil && cfg.Embedding.Enabled
-	
+
 	for _, t := range toolRegistry.GetAll() {
 		if t.ID() == "semantic_search" && !embeddingEnabled {
 			continue
@@ -430,7 +430,7 @@ func registerProject(path string) projectEntry {
 	return entry
 }
 
-func unregisterProject(path string) string {
+func unregisterProject(path string) {
 	absPath, _ := filepath.Abs(path)
 	pr := loadProjectRegistry()
 	var filtered []projectEntry
@@ -441,17 +441,6 @@ func unregisterProject(path string) string {
 	}
 	pr.Projects = filtered
 	saveProjectRegistry(pr)
-
-	// Only delete .agent if the path is inside the global workspaces root to respect the jail
-	if isAbsPathEqual(filepath.Dir(absPath), util.GlobalWorkspacesRoot) {
-		agentDir := filepath.Join(absPath, ".agent")
-		if info, err := os.Stat(agentDir); err == nil && info.IsDir() {
-			if err := os.RemoveAll(agentDir); err != nil {
-				return fmt.Sprintf("Warning: unregistered but failed to delete .agent: %v", err)
-			}
-		}
-	}
-	return ""
 }
 
 func listProjectConversations(workspace string) ([]map[string]any, error) {
@@ -576,7 +565,7 @@ func broadcastEvent(entry map[string]any) {
 }
 
 func subscribe() chan map[string]any {
-	ch := make(chan map[string]any, 64)
+	ch := make(chan map[string]any, 8192)
 	subsMu.Lock()
 	subscribers = append(subscribers, ch)
 	n := len(subscribers)
@@ -753,7 +742,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.1")
+		fmt.Println("QuietForge v1.1.2")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1028,7 +1017,7 @@ func registerTools() {
 		&impl.ShellTool{},
 		&impl.WebFetchTool{},
 		&impl.InvokeSubagentTool{
-			SpawnFunc: func(prompt, agentType, parentSessionID string) (string, error) {
+			SpawnFunc: func(prompt, agentType, parentSessionID string) (string, <-chan string, error) {
 				return spawnSubagent(prompt, agentType, parentSessionID)
 			},
 		},
@@ -1937,9 +1926,9 @@ func setupConfigRoutes(api fiber.Router) {
 	api.Get("/config/embedding", func(c *fiber.Ctx) error {
 		cfg := loadCfg()
 		if cfg.Embedding != nil {
-			return c.JSON(cfg.Embedding)
+			return c.JSON(fiber.Map{"embedding": cfg.Embedding})
 		}
-		return c.JSON(fiber.Map{})
+		return c.JSON(fiber.Map{"embedding": nil})
 	})
 
 	api.Get("/config/mcp", func(c *fiber.Ctx) error {
@@ -2220,7 +2209,8 @@ func setupProjectRoutes(api fiber.Router) {
 		}
 
 		// Remove it from the registry by its raw path so legacy projects can be removed.
-		warning := unregisterProject(payload.Path)
+		unregisterProject(payload.Path)
+		var warning string
 
 		// Close workspace DB before deleting .agent to avoid lock on Windows
 		if workspaceDir != "" && isAbsPathEqual(workspaceDir, payload.Path) {
@@ -2234,6 +2224,14 @@ func setupProjectRoutes(api fiber.Router) {
 			eventsMu.Lock()
 			liveEvents = nil
 			eventsMu.Unlock()
+		}
+
+		absPath, _ := filepath.Abs(payload.Path)
+		agentDir := filepath.Join(absPath, ".agent")
+		if info, err := os.Stat(agentDir); err == nil && info.IsDir() {
+			if err := os.RemoveAll(agentDir); err != nil {
+				warning = fmt.Sprintf("Warning: unregistered but failed to delete .agent: %v", err)
+			}
 		}
 
 		return c.JSON(fiber.Map{"ok": true, "warning": warning, "session_log": []any{}, "display_log": []map[string]any{}})
@@ -2857,7 +2855,7 @@ func formatToolSummary(toolName, argsStr string) string {
 	}
 	return summary
 }
-func spawnSubagent(prompt, agentType, parentSessionID string) (string, error) {
+func spawnSubagent(prompt, agentType, parentSessionID string) (string, <-chan string, error) {
 	newSessionID := fmt.Sprintf("sub-%d-%x", time.Now().UnixNano(), func() []byte { b := make([]byte, 4); rand.Read(b); return b }())
 
 	workspace := os.Getenv("WORKSPACE_DIR")
@@ -2882,15 +2880,33 @@ func spawnSubagent(prompt, agentType, parentSessionID string) (string, error) {
 
 	subSession := session.NewSession(newSessionID, sessionRepo, agentType, configToDict(appCfg), worktreePath)
 	if err := subSession.Save(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
+	doneChan := make(chan string, 1)
+
 	go func() {
+		defer func() {
+			if sessionRepo != nil && sessionRepo != repo {
+				sessionRepo.Close()
+			}
+		}()
 		ctx := context.Background()
 		runSubEngine(ctx, subSession, prompt, agentType, parentSessionID, worktreePath, wm, branchName)
+		
+		report := "Subagent failed or returned no response."
+		msgs := subSession.GetHistory()
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "assistant" && len(msgs[i].Parts) > 0 {
+				report = msgs[i].Parts[0].Content
+				break
+			}
+		}
+		doneChan <- report
+		close(doneChan)
 	}()
 
-	return newSessionID, nil
+	return newSessionID, doneChan, nil
 }
 
 func runSubEngine(ctx context.Context, subSession *session.Session, message, agentID, parentSessionID, workspace string, wm *util.WorktreeManager, branchName string) {
@@ -2935,25 +2951,6 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		}
 		subSession.Save()
 
-		if parentSessionID != "" && subSession.Repo != nil {
-			parentMsg := session.Message{
-				ID:        generateMsgID(),
-				SessionID: parentSessionID,
-				Role:      "user",
-				CreatedAt: time.Now().UnixMilli(),
-				Parts:     []session.MessagePart{{Type: "text", Content: fmt.Sprintf("Subagent %s has finished its task. Review its conversation history if needed.", subSession.SessionID)}},
-			}
-			parentSession := session.NewSession(parentSessionID, subSession.Repo, "", configToDict(appCfg), workspace)
-			if err := parentSession.Load(); err == nil {
-				parentSession.AddMessage(parentMsg)
-				parentSession.Save()
-			}
-			engineMu.Lock()
-			if activeSession != nil && activeSession.SessionID == parentSessionID {
-				activeSession.Load()
-			}
-			engineMu.Unlock()
-		}
 		if wm != nil && branchName != "" && workspace != os.Getenv("WORKSPACE_DIR") {
 			wm.Cleanup(branchName)
 		}
@@ -3438,22 +3435,37 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 	}
 
+	goalMode := false
+	cleanMsg := strings.TrimSpace(message)
+	if strings.HasPrefix(cleanMsg, "/goal ") {
+		goalMode = true
+		message = strings.TrimSpace(strings.TrimPrefix(cleanMsg, "/goal "))
+	} else if strings.HasPrefix(cleanMsg, "/auto ") {
+		goalMode = true
+		message = strings.TrimSpace(strings.TrimPrefix(cleanMsg, "/auto "))
+	} else if cleanMsg == "/goal" || cleanMsg == "/auto" {
+		goalMode = true
+		message = "Please proceed with the current goal."
+	}
+
 	enrichedMessage := message
 	if ctxOrchestrator != nil {
 		enrichedMessage = ctxOrchestrator.EnrichUserPrompt(message, workspace)
 	}
 
-	userMsg := session.Message{
-		ID:        generateMsgID(),
-		SessionID: activeSession.SessionID,
-		Role:      "user",
-		CreatedAt: time.Now().UnixMilli(),
-		Parts:     []session.MessagePart{{Type: "text", Content: enrichedMessage}},
+	if enrichedMessage != "" {
+		userMsg := session.Message{
+			ID:        generateMsgID(),
+			SessionID: activeSession.SessionID,
+			Role:      "user",
+			CreatedAt: time.Now().UnixMilli(),
+			Parts:     []session.MessagePart{{Type: "text", Content: enrichedMessage}},
+		}
+		if snapHash != "" {
+			userMsg.Metadata = map[string]any{"snapshot": snapHash}
+		}
+		activeSession.AddMessage(userMsg)
 	}
-	if snapHash != "" {
-		userMsg.Metadata = map[string]any{"snapshot": snapHash}
-	}
-	activeSession.AddMessage(userMsg)
 
 	cfg := loadCfg()
 	client := clientFromCfg(cfg)
@@ -3646,6 +3658,21 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		case <-ctx.Done():
 			debugLog("runEngine: cycle %d context cancelled after stream", i)
 			addLiveEvent("complete", map[string]any{"reason": "cancelled", "response": fullContent})
+			if cycleContent != "" || len(toolCalls) > 0 {
+				astMsg := session.Message{
+					ID:        generateMsgID(),
+					SessionID: activeSession.SessionID,
+					Role:      "assistant",
+					CreatedAt: time.Now().UnixMilli(),
+				}
+				if cycleContent != "" {
+					astMsg.Parts = append(astMsg.Parts, session.MessagePart{Type: "text", Content: cycleContent})
+				}
+				for _, tc := range toolCalls {
+					astMsg.Parts = append(astMsg.Parts, session.MessagePart{Type: "tool_use", ToolCallID: tc.ID, ToolName: tc.Name, Arguments: tc.Arguments})
+				}
+				activeSession.AddMessage(astMsg)
+			}
 			activeSession.Save()
 			return
 		default:
@@ -3786,6 +3813,24 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		promoteFallbackProvider(client, addLiveEvent)
 
 		if len(toolCalls) == 0 {
+			if goalMode && i < maxEngineCycles-1 {
+				debugLog("runEngine: cycle %d no tool calls, but in goalMode, auto-replying", i)
+				addLiveEvent("activity", map[string]any{"event": "Auto-proceeding..."})
+
+				autoMsg := session.Message{
+					ID:        generateMsgID(),
+					SessionID: activeSession.SessionID,
+					Role:      "user",
+					CreatedAt: time.Now().UnixMilli(),
+					Parts: []session.MessagePart{{
+						Type:    "text",
+						Content: "You are in goal mode. You must use tools to proceed. Do not stop to ask questions. Please execute the next tool.",
+					}},
+				}
+				activeSession.AddMessage(autoMsg)
+				continue
+			}
+
 			debugLog("runEngine: cycle %d no tool calls, breaking loop", i)
 			if originalCtxWindow > 0 && ctxWindow < originalCtxWindow {
 				debugLog("runEngine: saving reduced ctxWindow=%d to config", ctxWindow)
@@ -3919,6 +3964,10 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				case <-ctx.Done():
 					debugLog("runEngine: tool %s cancelled mid-execution", tc.Name)
 					addLiveEvent("complete", map[string]any{"reason": "cancelled", "response": fullContent})
+					if len(toolCalls) > 0 {
+						// The assistant message was already saved before tool execution.
+						// We only need to save the session state.
+					}
 					activeSession.Save()
 					return
 				default:

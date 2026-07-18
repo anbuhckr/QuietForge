@@ -21,7 +21,8 @@ func NewDatabase(path string) (*Database, error) {
 	}
 
 	// Use modernc.org/sqlite
-	db, err := sql.Open("sqlite", path)
+	dsn := path + "?_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -31,7 +32,7 @@ func NewDatabase(path string) (*Database, error) {
 	db.SetConnMaxLifetime(0)
 
 	// Set pragmas
-	_, err = db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+	_, err = db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
 	if err != nil {
 		return nil, fmt.Errorf("failed to set pragmas: %w", err)
 	}

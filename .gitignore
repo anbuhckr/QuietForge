@@ -21,3 +21,7 @@ server.key
 test-repo/
 original/
 scratch/
+runModel.bat
+mmproj-Qwythos*
+Qwythos*
+qwythos_template.jinja

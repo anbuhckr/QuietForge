@@ -377,18 +377,24 @@ class ConversationState {
         if (isToolResult) {
           // Do nothing, this is just a tool result in the middle of a turn's tool loop
         } else {
+          let existingTurn = oldTurns[this.turns.length];
           this.turns.push({
             user: parts[0]?.content || '',
-            agent: null,
-            liveContainer: [],
+            agent: existingTurn ? existingTurn.agent : null,
+            liveContainer: existingTurn ? existingTurn.liveContainer : [],
             completed: false,
             durationMs: msg.run_meta ? (msg.run_meta.duration_ms || 0) : 0,
             messageId: msg.id,
-            snapshot: msg.snapshot
+            snapshot: msg.snapshot,
+            hidden: msg.metadata ? msg.metadata.hidden : false
           });
         }
       } else if (role === 'assistant') {
         const turn = this._currentTurn();
+        if (msg.run_meta) {
+          turn.completed = true;
+          turn.durationMs = msg.run_meta.duration_ms || turn.durationMs;
+        }
         if (parts.length === 1 && parts[0].type === 'text') {
           let content = parts[0].content;
           let hasCompatTools = content.includes('Tool Call]');
@@ -397,6 +403,7 @@ class ConversationState {
               const regex = /([\s\S]*?)\[(?:Compat )?Tool Call\]\nTool: (.*)\nTool Input: ([\s\S]*?)\n\[\/Tool Call\]/g;
               let lastIndex = 0;
               let match;
+              turn.agent = ''; // reset agent text if we have tools, it will be rebuilt
               while ((match = regex.exec(content)) !== null) {
                   let think = match[1].trim();
                   const toolName = match[2];
@@ -582,39 +589,62 @@ class ConversationState {
 
       // 1. User Message
       if (turn.user) {
-        let d = turnGroup.querySelector('.msg.user');
-        if (!d) {
-            d = document.createElement('div');
-            d.className = 'msg user';
+        if (turn.hidden) {
+            let d = turnGroup.querySelector('.msg.user');
+            if (d) d.remove();
+        } else {
+            let d = turnGroup.querySelector('.msg.user');
+            if (!d) {
+                d = document.createElement('div');
+                d.className = 'msg user';
+                
+                let cleanedUser = (turn.user || '').trimStart();
+                if (cleanedUser.startsWith('{') && cleanedUser.includes('"context":')) {
+                    const regex = /\r?\n\r?\n/g;
+                    let match;
+                    while ((match = regex.exec(cleanedUser)) !== null) {
+                        let possibleJson = cleanedUser.substring(0, match.index);
+                        try {
+                            let parsed = JSON.parse(possibleJson);
+                            if (parsed.context) {
+                                cleanedUser = cleanedUser.substring(match.index + match[0].length);
+                                break;
+                            }
+                        } catch(e) {
+                            // keep looking
+                        }
+                    }
+                }
+                
+                let content = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(cleanedUser)) : esc(cleanedUser);
+                content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
+                content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
+                  return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
+                });
+                d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
+                turnGroup.appendChild(d);
+                lastUserMsg = d; // update global pointer
+            }
             
-            let content = esc(turn.user);
-            content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
-            content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
-              return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
-            });
-            d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
-            turnGroup.appendChild(d);
-            lastUserMsg = d; // update global pointer
-        }
-        
-        if (turn.snapshot && turn.messageId && !d.querySelector('.revert-btn')) {
-            const btn = document.createElement('button');
-            btn.className = 'revert-btn';
-            btn.title = 'Revert workspace to this point';
-            btn.textContent = '\u21B6';
-            btn.dataset.messageId = turn.messageId;
-            btn.onclick = async () => {
-              const r = await fetch('/api/chat/revert', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({message_id: turn.messageId})
-              });
-              if (r.ok) {
-                const data = await r.json();
-                this.loadDb(data.display_log, true);
-                await refresh(); 
-              }
-            };
-            d.querySelector('.label').after(btn);
+            if (turn.snapshot && turn.messageId && !d.querySelector('.revert-btn')) {
+                const btn = document.createElement('button');
+                btn.className = 'revert-btn';
+                btn.title = 'Revert workspace to this point';
+                btn.textContent = '\u21B6';
+                btn.dataset.messageId = turn.messageId;
+                btn.onclick = async () => {
+                  const r = await fetch('/api/chat/revert', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message_id: turn.messageId})
+                  });
+                  if (r.ok) {
+                    const data = await r.json();
+                    this.loadDb(data.display_log, true);
+                    await refresh(); 
+                  }
+                };
+                d.querySelector('.label').after(btn);
+            }
         }
       }
 
@@ -738,6 +768,9 @@ class ConversationState {
         if (isScrolledToBottom) {
             log.scrollTop = log.scrollHeight;
         }
+      } else {
+        let wrapper = turnGroup.querySelector('.live-container');
+        if (wrapper) wrapper.remove();
       }
 
       // 3. Agent Message
@@ -781,6 +814,9 @@ class ConversationState {
                }
             }
          }
+      } else {
+        let d = turnGroup.querySelector('.msg.agent');
+        if (d) d.remove();
       }
     _updateTokenDisplay();
   }
@@ -1272,6 +1308,7 @@ async function handleAgentEvent(d, isHistory = false) {
   if (d.type === 'token_usage') {
     totalTokens.prompt = d.total_prompt || 0;
     totalTokens.completion = d.total_completion || 0;
+    _updateTokenDisplay();
     return;
   }
   if (d.type === 'primary_changed') {
@@ -1299,7 +1336,7 @@ async function handleAgentEvent(d, isHistory = false) {
      _notifQueued = true;
      if (!isHistory) _playNotificationSound();
      
-      if (d.response) {
+      if (d.response && d.reason !== 'cancelled') {
           await conversationState.addLiveEvent({ type: 'token', text: d.response });
       }
       await conversationState.addLiveEvent({ 
@@ -1511,8 +1548,6 @@ async function stopRun() {
     })
   } catch (e) {
     await addMsg('Agent', 'STOP ERROR: ' + e.message)
-  } finally {
-    await refresh()
   }
 }
 
@@ -3061,4 +3096,33 @@ $('embeddingSave').onclick = async () => {
   } catch(e) {
     showNotification("Error saving embedding settings", "error");
   }
+};
+
+window.showNotification = function(msg, type = 'info') {
+  const notif = document.createElement('div');
+  notif.textContent = msg;
+  notif.style.position = 'fixed';
+  notif.style.bottom = '20px';
+  notif.style.right = '20px';
+  notif.style.padding = '12px 24px';
+  notif.style.background = type === 'error' ? '#ef4444' : (type === 'success' ? '#10b981' : '#3b82f6');
+  notif.style.color = '#fff';
+  notif.style.borderRadius = '6px';
+  notif.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
+  notif.style.zIndex = '9999';
+  notif.style.opacity = '0';
+  notif.style.transition = 'opacity 0.3s ease';
+  notif.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+  notif.style.fontWeight = '500';
+  
+  document.body.appendChild(notif);
+  
+  requestAnimationFrame(() => {
+    notif.style.opacity = '1';
+  });
+  
+  setTimeout(() => {
+    notif.style.opacity = '0';
+    setTimeout(() => notif.remove(), 300);
+  }, 3000);
 };

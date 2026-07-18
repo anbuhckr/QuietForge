@@ -27,7 +27,7 @@ func (t *ReadTool) ID() string {
 }
 
 func (t *ReadTool) Description() string {
-	return "Read a file or directory from the local filesystem. Returns content with line numbers."
+	return "Read a file or directory from the local filesystem. Returns content with line numbers, which are extremely useful when combined with edit tools (startLine/endLine) to avoid whitespace mismatches."
 }
 
 func (t *ReadTool) Parameters() map[string]interface{} {
