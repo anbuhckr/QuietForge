@@ -62,12 +62,7 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 			for j, part := range partsCopy {
 				if part.Type == "text" && part.Content != "" {
 					if thinkPattern.MatchString(part.Content) {
-						partsCopy[j].Content = thinkPattern.ReplaceAllStringFunc(part.Content, func(match string) string {
-							if len(match) > 10000 {
-								return "<think>\n[Thought process omitted for context limits]\n</think>"
-							}
-							return match
-						})
+						partsCopy[j].Content = thinkPattern.ReplaceAllString(part.Content, "")
 					}
 				}
 			}

@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/sashabaranov/go-openai"
@@ -103,6 +104,12 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 		}
 
 		content := strings.Join(textParts, "")
+		
+		// Strip think tags from history so models don't repeat their own thoughts
+		content = regexp.MustCompile(`(?is)<\/?(?:think|thought)>.*?<\/?(?:think|thought)>`).ReplaceAllString(content, "")
+		// Handle any remaining unclosed tags just in case
+		content = regexp.MustCompile(`(?is)<(?:think|thought)>.*`).ReplaceAllString(content, "")
+		content = strings.TrimSpace(content)
 
 		switch role {
 		case "assistant":

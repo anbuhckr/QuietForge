@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({
   '&': '&amp;',
   '<': '&lt;',
   '>': '&gt;'
-} [c]));
+}[c]));
 const md = s => {
   if (!window.marked || !window.DOMPurify) return esc(s);
   let html = DOMPurify.sanitize(marked.parse(String(s ?? '')));
@@ -39,7 +39,7 @@ const featureLabels = {
 let features = JSON.parse(localStorage.getItem('qf_features') || '{}');
 let intentMode = localStorage.getItem('qf_intent_mode');
 if (intentMode === 'auto' || !intentMode) intentMode = 'build';
-let totalTokens = {prompt: 0, completion: 0};
+let totalTokens = { prompt: 0, completion: 0 };
 let inputPricePerM = 2.50;
 let outputPricePerM = 10.00;
 
@@ -47,7 +47,7 @@ function _fmtTokens(n) {
   return n.toLocaleString();
 }
 function _fmtCost(cents) {
-  return '$' + cents.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return '$' + cents.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function _updateTokenDisplay() {
   const p = totalTokens.prompt || 0;
@@ -71,8 +71,8 @@ function _playNotificationSound() {
   try {
     const a = new Audio('/public/notification.mp3');
     a.volume = 0.5;
-    a.play().catch(() => {});
-  } catch(e) {}
+    a.play().catch(() => { });
+  } catch (e) { }
 }
 
 function textOfEditor() {
@@ -122,22 +122,22 @@ function updateBackdropHighlights() {
   const editor = $('editor');
   const highlights = $('editorHighlights');
   if (!editor || !highlights) return;
-  
+
   let text = editor.value;
   // Handle trailing newline so scroll height matches perfectly
   if (text.endsWith('\n')) text += ' ';
-  
+
   // Escape HTML
   let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  
+
   // Highlight /commands
   html = html.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
-  
+
   // Highlight @mentions (including trailing slash for folders)
   html = html.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
     return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
   });
-  
+
   highlights.innerHTML = html;
 }
 
@@ -190,7 +190,7 @@ function chooseSuggestion(i) {
   setEditorText(t);
   suggestions = [];
   renderSuggestions()
-  
+
   setTimeout(() => {
     const el = $('editor');
     el.focus();
@@ -277,7 +277,7 @@ let runStartTime = 0, runTimerInterval = null;
 
 class ConversationState {
   constructor() {
-    this.turns = []; 
+    this.turns = [];
   }
 
   _currentTurn() {
@@ -293,62 +293,62 @@ class ConversationState {
   }
 
   formatToolCall(rawStr) {
-     const spaceIdx = rawStr.indexOf(' ');
-     if (spaceIdx === -1) return rawStr;
-     const toolName = rawStr.substring(0, spaceIdx);
-     const argStr = rawStr.substring(spaceIdx + 1);
-     try {
-         const args = JSON.parse(argStr);
-         let s = [];
-         
-         if (toolName === 'view_file' || toolName === 'read_file' || toolName === 'read') {
-             let f = args.AbsolutePath || args.path || args.TargetFile || args.filePath || args.filepath || '';
-             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
-             let start = args.StartLine || args.start || '';
-             let end = args.EndLine || args.end || '';
-             if (start && end) return `${toolName} ${f} ${start}-${end}`;
-             if (start) return `${toolName} ${f} ${start}-...`;
-             return `${toolName} ${f}`;
-         } else if (toolName === 'replace_file_content' || toolName === 'multi_replace_file_content' || toolName === 'write_to_file' || toolName === 'write_file' || toolName === 'edit' || toolName === 'write') {
-             let f = args.TargetFile || args.AbsolutePath || args.path || args.filePath || args.filepath || '';
-             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
-             return `${toolName} ${f}`;
-         } else if (toolName === 'grep_search' || toolName === 'grep' || toolName === 'search' || toolName === 'glob') {
-             let f = args.SearchPath || args.path || args.filePath || args.filepath || args.DirectoryPath || '';
-             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
-             return `${toolName} "${args.Query || args.query || args.pattern || '*'}" in ${f}`;
-         } else if (toolName === 'list_dir' || toolName === 'list') {
-             let f = args.DirectoryPath || args.path || args.filePath || args.filepath || '';
-             if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
-             return `list ${f}`;
-         } else if (toolName === 'run_command' || toolName === 'command' || toolName === 'run') {
-             return `run ${args.CommandLine || args.command || args.cmd || ''}`;
-         }
+    const spaceIdx = rawStr.indexOf(' ');
+    if (spaceIdx === -1) return rawStr;
+    const toolName = rawStr.substring(0, spaceIdx);
+    const argStr = rawStr.substring(spaceIdx + 1);
+    try {
+      const args = JSON.parse(argStr);
+      let s = [];
 
-         for (let k in args) {
-             let v = args[k];
-             if (typeof v === 'string') {
-                 if (v.includes('\n') || v.length > 50) {
-                     v = v.replace(/\n/g, '\\n');
-                     if (v.length > 50) v = v.substring(0, 50) + '...';
-                 } else if (v.includes('/') || v.includes('\\')) {
-                     v = v.split(/[\\/]/).pop();
-                 }
-             } else if (typeof v === 'object' && v !== null) {
-                 v = JSON.stringify(v);
-                 if (v.length > 50) v = v.substring(0, 50) + '...';
-             } else {
-                 v = String(v);
-             }
-             if (typeof v === 'string' && !v.startsWith('"') && !v.startsWith('[')) {
-                 v = `"${v}"`;
-             }
-             s.push(v);
-         }
-         return `${toolName} ${s.join(' ')}`;
-     } catch(e) {
-         return rawStr;
-     }
+      if (toolName === 'view_file' || toolName === 'read_file' || toolName === 'read') {
+        let f = args.AbsolutePath || args.path || args.TargetFile || args.filePath || args.filepath || '';
+        if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+        let start = args.StartLine || args.start || '';
+        let end = args.EndLine || args.end || '';
+        if (start && end) return `${toolName} ${f} ${start}-${end}`;
+        if (start) return `${toolName} ${f} ${start}-...`;
+        return `${toolName} ${f}`;
+      } else if (toolName === 'replace_file_content' || toolName === 'multi_replace_file_content' || toolName === 'write_to_file' || toolName === 'write_file' || toolName === 'edit' || toolName === 'write') {
+        let f = args.TargetFile || args.AbsolutePath || args.path || args.filePath || args.filepath || '';
+        if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+        return `${toolName} ${f}`;
+      } else if (toolName === 'grep_search' || toolName === 'grep' || toolName === 'search' || toolName === 'glob') {
+        let f = args.SearchPath || args.path || args.filePath || args.filepath || args.DirectoryPath || '';
+        if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+        return `${toolName} "${args.Query || args.query || args.pattern || '*'}" in ${f}`;
+      } else if (toolName === 'list_dir' || toolName === 'list') {
+        let f = args.DirectoryPath || args.path || args.filePath || args.filepath || '';
+        if (typeof f === 'string' && (f.includes('/') || f.includes('\\'))) f = f.split(/[\\/]/).pop();
+        return `list ${f}`;
+      } else if (toolName === 'run_command' || toolName === 'command' || toolName === 'run') {
+        return `run ${args.CommandLine || args.command || args.cmd || ''}`;
+      }
+
+      for (let k in args) {
+        let v = args[k];
+        if (typeof v === 'string') {
+          if (v.includes('\n') || v.length > 50) {
+            v = v.replace(/\n/g, '\\n');
+            if (v.length > 50) v = v.substring(0, 50) + '...';
+          } else if (v.includes('/') || v.includes('\\')) {
+            v = v.split(/[\\/]/).pop();
+          }
+        } else if (typeof v === 'object' && v !== null) {
+          v = JSON.stringify(v);
+          if (v.length > 50) v = v.substring(0, 50) + '...';
+        } else {
+          v = String(v);
+        }
+        if (typeof v === 'string' && !v.startsWith('"') && !v.startsWith('[')) {
+          v = `"${v}"`;
+        }
+        s.push(v);
+      }
+      return `${toolName} ${s.join(' ')}`;
+    } catch (e) {
+      return rawStr;
+    }
   }
 
   async addSystemMsg(txt) {
@@ -363,14 +363,15 @@ class ConversationState {
     if (clearDom) {
       document.getElementById('chat').innerHTML = '';
     }
+
     source.forEach(msg => {
       const role = String(msg.role || '').toLowerCase();
       const parts = msg.parts || [];
-      
+
       if (role === 'user') {
         // A new user message implies the previous turn's tool loop is finished.
         if (this.turns.length > 0) {
-            this.turns[this.turns.length - 1].completed = true;
+          this.turns[this.turns.length - 1].completed = true;
         }
 
         const isToolResult = parts.some(p => p.type === 'tool_result' || (p.type === 'text' && p.content && p.content.match(/^\[.*? Result\]\n/)));
@@ -378,15 +379,17 @@ class ConversationState {
           // Do nothing, this is just a tool result in the middle of a turn's tool loop
         } else {
           let existingTurn = oldTurns[this.turns.length];
+          let isSame = existingTurn && existingTurn.messageId === msg.id;
           this.turns.push({
             user: parts[0]?.content || '',
-            agent: existingTurn ? existingTurn.agent : null,
-            liveContainer: existingTurn ? existingTurn.liveContainer : [],
+            agent: isSame ? existingTurn.agent : null,
+            liveContainer: isSame ? existingTurn.liveContainer : [],
             completed: false,
             durationMs: msg.run_meta ? (msg.run_meta.duration_ms || 0) : 0,
             messageId: msg.id,
             snapshot: msg.snapshot,
-            hidden: msg.metadata ? msg.metadata.hidden : false
+            hidden: msg.metadata ? msg.metadata.hidden : false,
+            _pendingTools: []
           });
         }
       } else if (role === 'assistant') {
@@ -395,63 +398,88 @@ class ConversationState {
           turn.completed = true;
           turn.durationMs = msg.run_meta.duration_ms || turn.durationMs;
         }
-        if (parts.length === 1 && parts[0].type === 'text') {
-          let content = parts[0].content;
-          let hasCompatTools = content.includes('Tool Call]');
-          
-          if (hasCompatTools) {
+        const oldTurn = oldTurns[this.turns.length - 1] || {};
+        
+        const isSame = (oldTurn.messageId === msg.id) || (!oldTurn.messageId && oldTurn.completed);
+        
+        if (isSame) {
+          // Restore the perfect Live SSE state that was accidentally wiped by _currentTurn()
+          turn.liveContainer = oldTurn.liveContainer;
+          turn.agent = oldTurn.agent;
+          turn.messageId = msg.id; // Save the real ID from the DB so future checks pass
+        }
+        
+        // ONLY parse the DB if it's a completely different turn (e.g. historical). 
+        // We never want to parse the active turn from the DB because the DB groups tools differently than Live SSE, causing duplicates.
+        if (!isSame) {
+          turn.liveContainer = []; // Start fresh so we don't mutate references
+          turn.agent = '';
+          if (parts.length === 1 && parts[0].type === 'text') {
+            let content = parts[0].content;
+            let hasCompatTools = content.includes('Tool Call]');
+
+            if (hasCompatTools) {
               const regex = /([\s\S]*?)\[(?:Compat )?Tool Call\]\nTool: (.*)\nTool Input: ([\s\S]*?)\n\[\/Tool Call\]/g;
               let lastIndex = 0;
               let match;
-              turn.agent = ''; // reset agent text if we have tools, it will be rebuilt
+              turn.agent = '';
               while ((match = regex.exec(content)) !== null) {
-                  let think = match[1].trim();
-                  const toolName = match[2];
-                  const toolInput = match[3];
-                  let toolStr = `${toolName} ${toolInput}`;
-                  try { toolStr = this.formatToolCall(toolStr); } catch(e) {}
-                  if (think && /\[Thought process omitted/i.test(think)) {
-                      think = null;
-                  }
-                  turn.liveContainer.push({ think: think || null, tools: [toolStr] });
-                  lastIndex = regex.lastIndex;
+                let think = match[1].trim();
+                const toolName = match[2];
+                const toolInput = match[3];
+                let toolStr = `${toolName} ${toolInput}`;
+                try { toolStr = this.formatToolCall(toolStr); } catch (e) { }
+                if (think && /\[Thought process omitted/i.test(think)) {
+                  think = null;
+                }
+                turn.liveContainer.push({ think: think || null, tools: [toolStr] });
+                lastIndex = regex.lastIndex;
               }
               const remainder = content.substring(lastIndex).trim();
               if (remainder) turn.agent = remainder;
-          } else {
-              turn.agent = content;
-          }
-          turn.completed = true;
-        } else {
-          let think = null;
-          let tools = [];
-          parts.forEach(p => {
-            if (p.type === 'text') {
-              let textContent = p.content;
-              let thinkText = "";
-              const thinkMatch = /<think>([\s\S]*?)<\/think>/.exec(textContent);
-              if (thinkMatch) {
-                  thinkText = thinkMatch[1].trim();
-                  textContent = textContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-              }
-              if (thinkText && !/\[Thought process omitted/i.test(thinkText)) {
-                  think = (think || '') + thinkText;
-              }
-              if (textContent) {
-                  turn.agent = (turn.agent || '') + textContent;
-              }
-            } else if (p.type === 'tool_use') {
-              try {
-                  tools.push(this.formatToolCall(`${p.tool_name} ${p.arguments}`));
-              } catch(e) {
-                  tools.push(`${p.tool_name} ${p.arguments}`);
+            } else {
+              const entries = this._parseThinkBlocks(content, "");
+              for (const e of entries) {
+                if (e.think) {
+                  turn.liveContainer.push({ think: e.think, tools: [] });
+                  if (turn._pendingTools.length > 0) {
+                    turn.liveContainer[turn.liveContainer.length - 1].tools.unshift(...turn._pendingTools);
+                    turn._pendingTools = [];
+                  }
+                }
+                if (e.content) {
+                  turn.agent = (turn.agent || '') + e.content;
+                }
               }
             }
-          });
-          turn.liveContainer.push({ think, tools });
+            turn.completed = true;
+          } else {
+            parts.forEach(p => {
+              if (p.type === 'text') {
+                const parsed = this._parseThinkBlocks(p.content, "");
+                for (const e of parsed) {
+                  if (e.think) {
+                    turn.liveContainer.push({ think: e.think, tools: [] });
+                  } else if (e.content) {
+                    turn.agent = (turn.agent || '') + e.content;
+                  }
+                }
+              } else if (p.type === 'tool_use') {
+                let toolStr = `${p.tool_name} ${p.arguments}`;
+                try { toolStr = this.formatToolCall(toolStr); } catch (e) { }
+                
+                if (turn.liveContainer.length > 0) {
+                  turn.liveContainer[turn.liveContainer.length - 1].tools.push(toolStr);
+                } else {
+                  turn._pendingTools.push(toolStr);
+                }
+              }
+            });
+          }
         }
-        
-        const oldTurn = oldTurns[this.turns.length - 1] || {};
+
+        const partsSummary = parts.map(p => p.type === 'tool_use' ? p.tool_name : 'text:' + (p.content || '').substring(0, 30));
+
 
         if (msg.run_meta && msg.run_meta.duration_ms) {
           turn.completed = true;
@@ -467,17 +495,33 @@ class ConversationState {
         }
       }
     });
+    // Flush any remaining pending tools
+    for (const turn of this.turns) {
+      if (turn._pendingTools && turn._pendingTools.length > 0) {
+        if (turn.liveContainer.length > 0) {
+          turn.liveContainer[turn.liveContainer.length - 1].tools.push(...turn._pendingTools);
+        } else {
+          turn.liveContainer.push({ think: null, tools: [...turn._pendingTools] });
+        }
+        turn._pendingTools = [];
+      }
+    }
     await this.render();
   }
 
   async addLiveEvent(evt) {
     const turn = this._currentTurn();
     const kind = evt.type || evt.kind || 'activity';
-    const rawText = String(evt.text || evt.event || evt.message || evt.error || '').trim();
-    if (!rawText) return;
+    let rawText = String(evt.text || evt.event || evt.message || evt.error || '');
+    if (kind !== 'token' && kind !== 'think') {
+      rawText = rawText.trim();
+    }
+    if (!rawText && kind !== 'token' && kind !== 'think' && kind !== 'replace_content') return;
 
     if (kind === 'think') {
       if (/\[Thought process omitted/i.test(rawText)) return;
+      const beforeLen = turn.liveContainer.length;
+      // const beforeTools = beforeLen > 0 ? turn.liveContainer[beforeLen - 1].tools.length : 0;
       if (turn.liveContainer.length === 0 || turn.liveContainer[turn.liveContainer.length - 1].tools.length > 0) {
         turn.liveContainer.push({ think: rawText, tools: [] });
       } else {
@@ -488,14 +532,20 @@ class ConversationState {
           lastBlock.think = (lastBlock.think || '') + rawText;
         }
       }
+      // const lcSnapshot = turn.liveContainer.map(e => ({ think: e.think, tools: e.tools }));
+
     } else if (kind === 'action') {
       if (rawText.startsWith('Executing: ')) {
         let tool = rawText.replace(/^Executing:\s*/, '');
         tool = this.formatToolCall(tool);
+        const beforeLen = turn.liveContainer.length;
+        // const beforeTools = beforeLen > 0 ? turn.liveContainer[beforeLen - 1].tools.length : 0;
         if (turn.liveContainer.length === 0) {
           turn.liveContainer.push({ think: null, tools: [] });
         }
         turn.liveContainer[turn.liveContainer.length - 1].tools.push(tool);
+        // const lcSnapshot = turn.liveContainer.map(e => ({ think: e.think, tools: e.tools }));
+
       } else return;
     } else if (kind === 'activity') {
       if (rawText === 'Compacting memory...') {
@@ -504,21 +554,57 @@ class ConversationState {
         }
         turn.liveContainer[turn.liveContainer.length - 1].tools.push('compacting...');
       } else if (rawText.toLowerCase().includes('error')) {
-         turn.liveContainer.push({ think: '❌ ' + rawText, tools: [] });
+        turn.liveContainer.push({ think: '❌ ' + rawText, tools: [] });
       } else return;
+    } else if (kind === 'replace_content') {
+      turn.agent = evt.content;
+      const parsed = this._parseThinkBlocks(evt.content, "");
+      const thinkEntries = parsed.filter(e => e.think).map(e => e.think);
+      if (thinkEntries.length > 0 && turn.liveContainer.length > 0) {
+        turn.liveContainer[turn.liveContainer.length - 1].think = thinkEntries[thinkEntries.length - 1];
+      }
     } else if (kind === 'token') {
       turn.agent = (turn.agent || '') + rawText;
-      turn.completed = true;
     } else if (kind === 'done' || kind === 'complete') {
       turn.completed = true;
       if (evt.duration_ms) turn.durationMs = evt.duration_ms;
       if (evt.workspace_changes) turn.workspaceChanges = evt.workspace_changes;
+      // const lcSnapshot = turn.liveContainer.map(e => ({ think: e.think, tools: e.tools }));
+
       return;
     }
 
     requestAnimationFrame(async () => {
       await this.render();
     });
+  }
+
+  _parseThinkBlocks(content, toolsJson) {
+    const results = [];
+    const thinkRegex = /<(?:think|thought)>([\s\S]*?)(<\/(?:think|thought)>|$)/gi;
+    let lastIdx = 0;
+    let match;
+    while ((match = thinkRegex.exec(content)) !== null) {
+      if (match.index > lastIdx) {
+        const between = content.substring(lastIdx, match.index);
+        if (between.trim()) {
+          results.push({ think: null, content: between });
+        }
+      }
+      let thinkText = match[1].trim();
+      if (thinkText && /\[Thought process omitted/i.test(thinkText)) {
+        thinkText = "";
+      }
+      results.push({ think: thinkText, content: "" });
+      lastIdx = thinkRegex.lastIndex;
+    }
+    if (lastIdx < content.length) {
+      const remaining = content.substring(lastIdx);
+      if (remaining.trim()) {
+        results.push({ think: null, content: remaining });
+      }
+    }
+    return results;
   }
 
   formatRunDuration(ms) {
@@ -534,299 +620,348 @@ class ConversationState {
     const chat = document.getElementById('chat');
 
     if (this.turns.length === 0) {
-        chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
-        if (shouldFollow) scrollChatToBottom();
-        return;
+      chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
+      if (shouldFollow) scrollChatToBottom();
+      return;
     }
 
     if (chat.children.length === 1 && chat.children[0].classList.contains('system')) {
-        chat.innerHTML = '';
+      chat.innerHTML = '';
     }
 
     while (chat.children.length > this.turns.length) {
-        chat.removeChild(chat.lastChild);
+      chat.removeChild(chat.lastChild);
     }
 
     for (let i = 0; i < this.turns.length; i++) {
-        const turn = this.turns[i];
-        let turnGroup = chat.children[i];
-        const isLast = (i === this.turns.length - 1);
-        
-        if (!turnGroup) {
-            turnGroup = document.createElement('div');
-            turnGroup.className = 'chat-turn';
-            chat.appendChild(turnGroup);
-        } else {
-            // Skip re-rendering fully completed historical turns to preserve DOM state
-            if (!isLast && turnGroup.dataset.renderedFinal === "true") {
-                continue;
-            }
+      const turn = this.turns[i];
+      let turnGroup = chat.children[i];
+      const isLast = (i === this.turns.length - 1);
+
+      if (!turnGroup) {
+        turnGroup = document.createElement('div');
+        turnGroup.className = 'chat-turn';
+        chat.appendChild(turnGroup);
+      } else {
+        // Skip re-rendering fully completed historical turns to preserve DOM state
+        if (!isLast && turnGroup.dataset.renderedFinal === "true") {
+          continue;
         }
-        
-        await this._renderTurn(turnGroup, turn);
-        
-        // Mark as final if it's a completed historical turn
-        if (!isLast && turn.completed) {
-            turnGroup.dataset.renderedFinal = "true";
-        }
+      }
+
+      await this._renderTurn(turnGroup, turn);
+
+      // Mark as final if it's a completed historical turn
+      if (!isLast && turn.completed) {
+        turnGroup.dataset.renderedFinal = "true";
+      }
     }
-    
+
     updateStickyPrompts();
     if (shouldFollow) scrollChatToBottom();
   }
 
   async _renderTurn(turnGroup, turn) {
-      if (turn.system) {
-          let sysD = turnGroup.querySelector('.msg.agent');
-          if (!sysD) {
-              sysD = document.createElement('div');
-              sysD.className = 'msg agent';
-              sysD.innerHTML = `<div class="label">System</div><div class="bubble">${esc(turn.system)}</div>`;
-              turnGroup.appendChild(sysD);
-          }
-          return;
+    if (turn.system) {
+      let sysD = turnGroup.querySelector('.msg.agent');
+      if (!sysD) {
+        sysD = document.createElement('div');
+        sysD.className = 'msg agent';
+        sysD.innerHTML = `<div class="label">System</div><div class="bubble">${esc(turn.system)}</div>`;
+        turnGroup.appendChild(sysD);
       }
+      return;
+    }
 
-      // 1. User Message
-      if (turn.user) {
-        if (turn.hidden) {
-            let d = turnGroup.querySelector('.msg.user');
-            if (d) d.remove();
-        } else {
-            let d = turnGroup.querySelector('.msg.user');
-            if (!d) {
-                d = document.createElement('div');
-                d.className = 'msg user';
-                
-                let cleanedUser = (turn.user || '').trimStart();
-                if (cleanedUser.startsWith('{') && cleanedUser.includes('"context":')) {
-                    const regex = /\r?\n\r?\n/g;
-                    let match;
-                    while ((match = regex.exec(cleanedUser)) !== null) {
-                        let possibleJson = cleanedUser.substring(0, match.index);
-                        try {
-                            let parsed = JSON.parse(possibleJson);
-                            if (parsed.context) {
-                                cleanedUser = cleanedUser.substring(match.index + match[0].length);
-                                break;
-                            }
-                        } catch(e) {
-                            // keep looking
-                        }
-                    }
-                }
-                
-                let content = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(cleanedUser)) : esc(cleanedUser);
-                content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
-                content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
-                  return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
-                });
-                d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
-                turnGroup.appendChild(d);
-                lastUserMsg = d; // update global pointer
-            }
-            
-            if (turn.snapshot && turn.messageId && !d.querySelector('.revert-btn')) {
-                const btn = document.createElement('button');
-                btn.className = 'revert-btn';
-                btn.title = 'Revert workspace to this point';
-                btn.textContent = '\u21B6';
-                btn.dataset.messageId = turn.messageId;
-                btn.onclick = async () => {
-                  const r = await fetch('/api/chat/revert', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({message_id: turn.messageId})
-                  });
-                  if (r.ok) {
-                    const data = await r.json();
-                    this.loadDb(data.display_log, true);
-                    await refresh(); 
-                  }
-                };
-                d.querySelector('.label').after(btn);
-            }
-        }
-      }
-
-      // 2. Live Logs (Background activity)
-      if (turn.liveContainer.length > 0) {
-        let wrapper = turnGroup.querySelector('.live-container');
-        if (!wrapper) {
-            wrapper = document.createElement('div');
-            wrapper.className = 'live-container';
-            wrapper.style.display = 'flex';
-            wrapper.style.flexDirection = 'column';
-            wrapper.style.gap = '6px';
-            wrapper.style.marginBottom = '10px';
-            wrapper.style.marginTop = '2px';
-
-            const details = document.createElement('details');
-            details.className = 'inline-live';
-            
-            const sharedLogHtml = `<div class="compact-log live-log" style="margin-top:8px; padding-left:16px; display:flex; flex-direction:column; gap:4px; max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: rgba(255,255,255,0.14) transparent;"></div>`;
-            
-            if (turn.completed) {
-                details.classList.add('live-compact');
-                details.open = false;
-                const durationTxt = this.formatRunDuration(turn.durationMs || 0);
-                details.innerHTML = `<summary><span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span></summary>` + sharedLogHtml;
-            } else {
-                details.classList.add('flat-live');
-                details.open = true;
-                details.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;">Running background tasks...</span><span class="timer" style="margin-left:8px; opacity:0.6; font-variant-numeric: tabular-nums;"></span></summary>` + sharedLogHtml;
-            }
-            
-            details.dataset.completedState = turn.completed ? "true" : "false";
-            wrapper.appendChild(details);
-            
-            const agentNode = turnGroup.querySelector('.msg.agent');
-            if (agentNode) {
-                turnGroup.insertBefore(wrapper, agentNode);
-            } else {
-                turnGroup.appendChild(wrapper);
-            }
-        } else {
-            const details = wrapper.querySelector('details.inline-live');
-            const isCompleted = turn.completed;
-            const currentCompletedState = details.dataset.completedState === "true";
-            
-            if (isCompleted) {
-                if (!currentCompletedState) {
-                    details.classList.remove('flat-live');
-                    details.classList.add('live-compact');
-                    details.open = false;
-                    details.dataset.completedState = "true";
-                }
-                
-                // ALWAYS update duration text if it's completed, in case the value changed (e.g. from 1s to the real duration)
-                const durationTxt = this.formatRunDuration(turn.durationMs || 0);
-                const summary = details.querySelector('summary');
-                if (summary) {
-                    summary.innerHTML = `<span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span>`;
-                }
-            }
-        }
-
-        const details = wrapper.querySelector('details.inline-live');
-        const log = details.querySelector('.compact-log');
-        const renderedCount = parseInt(log.dataset.count || "0", 10);
-        const isScrolledToBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 10;
-        
-        if (turn.liveContainer.length > renderedCount) {
-            for (let i = renderedCount; i < turn.liveContainer.length; i++) {
-                const block = turn.liveContainer[i];
-                if (block.think) {
-                    const entry = document.createElement('div');
-                    entry.className = 'live-entry markdown-body';
-                    entry.dataset.thinkIdx = i;
-                    entry.dataset.len = block.think.length;
-                    entry.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
-                    log.appendChild(entry);
-                }
-                if (block.tools) {
-                    block.tools.forEach(t => {
-                        const entry = document.createElement('div');
-                        entry.className = 'live-entry markdown-body action-entry';
-                        entry.style.animation = 'none';
-                        if (t === 'compacting...') {
-                            entry.innerHTML = `<p>⚙️ compacting...</p>`;
-                        } else {
-                            entry.innerHTML = `<p>⚙️ ${esc(t)}</p>`;
-                        }
-                        log.appendChild(entry);
-                    });
-                }
-            }
-            log.dataset.count = turn.liveContainer.length;
-        }
-        for (let i = 0; i < Math.min(turn.liveContainer.length, renderedCount); i++) {
-            const block = turn.liveContainer[i];
-            if (block.think) {
-                const thinkNode = log.querySelector(`[data-think-idx="${i}"]`);
-                if (thinkNode) {
-                    const currentLen = parseInt(thinkNode.dataset.len || "0", 10);
-                    if (block.think.length > currentLen) {
-                        thinkNode.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
-                        thinkNode.dataset.len = block.think.length;
-                    }
-                }
-            }
-            if (!block.tools) continue;
-            const toolKey = 't_' + i;
-            const renderedTools = parseInt(log.dataset[toolKey] || "0", 10);
-            if (block.tools.length > renderedTools) {
-                for (let j = renderedTools; j < block.tools.length; j++) {
-                    const entry = document.createElement('div');
-                    entry.className = 'live-entry markdown-body action-entry';
-                    entry.style.animation = 'none';
-                    entry.innerHTML = `<p>⚙️ ${esc(block.tools[j])}</p>`;
-                    log.appendChild(entry);
-                }
-                log.dataset[toolKey] = block.tools.length;
-            }
-        }
-        if (isScrolledToBottom) {
-            log.scrollTop = log.scrollHeight;
-        }
-      } else {
-        let wrapper = turnGroup.querySelector('.live-container');
-        if (wrapper) wrapper.remove();
-      }
-
-      // 3. Agent Message
-      if (turn.agent) {
-        let d = turnGroup.querySelector('.msg.agent');
-        if (!d) {
-            d = document.createElement('div');
-            d.className = 'msg agent';
-            d.innerHTML = `<div class="label">Agent</div><div class="bubble markdown-body"></div>`;
-            turnGroup.appendChild(d);
-        }
-        
-        let content = turn.agent;
-        
-        // Parse <think> tags from DeepSeek R1 (hide completely in final response per user request)
-        content = content.replace(/<think>([\s\S]*?)<\/think>/g, '');
-        
-        if (window.marked) {
-            content = md(content);
-        } else {
-            content = esc(content);
-        }
-        
-        const bubble = d.querySelector('.bubble');
-        if (bubble) {
-            bubble.innerHTML = content;
-        }
-        
-        // Render any UI widgets for changed files
-        if (turn.workspaceChanges) {
-           let changedFiles = [];
-           if (turn.workspaceChanges.created) changedFiles.push(...turn.workspaceChanges.created);
-           if (turn.workspaceChanges.modified) changedFiles.push(...turn.workspaceChanges.modified);
-           if (changedFiles.length > 0 && window.latestArtifacts) {
-              if (!d.dataset.renderedDiffs) {
-                  let relevantDiffs = matchingDiffArtifactsForChangedFiles(changedFiles);
-                  if (relevantDiffs.length > 0) {
-                      renderDiffReviewWidget(d, relevantDiffs);
-                      d.dataset.renderedDiffs = "true";
-                  }
-               }
-            }
-         }
-      } else {
-        let d = turnGroup.querySelector('.msg.agent');
+    // 1. User Message
+    if (turn.user) {
+      if (turn.hidden) {
+        let d = turnGroup.querySelector('.msg.user');
         if (d) d.remove();
+      } else {
+        let d = turnGroup.querySelector('.msg.user');
+        if (!d) {
+          d = document.createElement('div');
+          d.className = 'msg user';
+
+          let cleanedUser = (turn.user || '').trimStart();
+          if (cleanedUser.startsWith('{') && cleanedUser.includes('"context":')) {
+            const regex = /\r?\n\r?\n/g;
+            let match;
+            while ((match = regex.exec(cleanedUser)) !== null) {
+              let possibleJson = cleanedUser.substring(0, match.index);
+              try {
+                let parsed = JSON.parse(possibleJson);
+                if (parsed.context) {
+                  cleanedUser = cleanedUser.substring(match.index + match[0].length);
+                  break;
+                }
+              } catch (e) {
+                // keep looking
+              }
+            }
+          }
+
+          let content = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(cleanedUser)) : esc(cleanedUser);
+          content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
+          content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
+            return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
+          });
+          d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
+          turnGroup.appendChild(d);
+          lastUserMsg = d; // update global pointer
+        }
+
+        if (turn.snapshot && turn.messageId && !d.querySelector('.revert-btn')) {
+          const btn = document.createElement('button');
+          btn.className = 'revert-btn';
+          btn.title = 'Revert workspace to this point';
+          btn.textContent = '\u21B6';
+          btn.dataset.messageId = turn.messageId;
+          btn.onclick = async () => {
+            const r = await fetch('/api/chat/revert', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message_id: turn.messageId, conversation_id: window.currentConversationId })
+            });
+            if (r.ok) {
+              const data = await r.json();
+              this.loadDb(data.display_log, true);
+              await refresh();
+            }
+          };
+          d.querySelector('.label').after(btn);
+        }
       }
+    }
+
+    // 2. Live Logs (Background activity)
+    if (turn.liveContainer.length > 0) {
+      let wrapper = turnGroup.querySelector('.live-container');
+      if (!wrapper) {
+        wrapper = document.createElement('div');
+        wrapper.className = 'live-container';
+        wrapper.style.display = 'flex';
+        wrapper.style.flexDirection = 'column';
+        wrapper.style.gap = '6px';
+        wrapper.style.marginBottom = '10px';
+        wrapper.style.marginTop = '2px';
+
+        const details = document.createElement('details');
+        details.className = 'inline-live';
+
+        const sharedLogHtml = `<div class="compact-log live-log" style="margin-top:8px; padding-left:16px; display:flex; flex-direction:column; gap:4px; max-height:200px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color: rgba(255,255,255,0.14) transparent;"></div>`;
+
+        if (turn.completed) {
+          details.classList.add('live-compact');
+          details.open = false;
+          const durationTxt = this.formatRunDuration(turn.durationMs || 0);
+          details.innerHTML = `<summary><span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span></summary>` + sharedLogHtml;
+        } else {
+          details.classList.add('flat-live');
+          details.open = true;
+          details.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;">Running background tasks...</span><span class="timer" style="margin-left:8px; opacity:0.6; font-variant-numeric: tabular-nums;"></span></summary>` + sharedLogHtml;
+        }
+
+        details.dataset.completedState = turn.completed ? "true" : "false";
+        wrapper.appendChild(details);
+
+        const agentNode = turnGroup.querySelector('.msg.agent');
+        if (agentNode) {
+          turnGroup.insertBefore(wrapper, agentNode);
+        } else {
+          turnGroup.appendChild(wrapper);
+        }
+      } else {
+        const details = wrapper.querySelector('details.inline-live');
+        const isCompleted = turn.completed;
+        const currentCompletedState = details.dataset.completedState === "true";
+
+        if (isCompleted) {
+          if (!currentCompletedState) {
+            details.classList.remove('flat-live');
+            details.classList.add('live-compact');
+            details.open = false;
+            details.dataset.completedState = "true";
+          }
+
+          // ALWAYS update duration text if it's completed, in case the value changed (e.g. from 1s to the real duration)
+          const durationTxt = this.formatRunDuration(turn.durationMs || 0);
+          const summary = details.querySelector('summary');
+          if (summary) {
+            summary.innerHTML = `<span class="compact-label">Worked for ${esc(durationTxt)}</span><span class="compact-arrow">›</span>`;
+          }
+        }
+      }
+
+      const details = wrapper.querySelector('details.inline-live');
+      const log = details.querySelector('.compact-log');
+      const renderedCount = parseInt(log.dataset.count || "0", 10);
+      const isScrolledToBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 10;
+
+      if (turn.liveContainer.length > renderedCount) {
+        for (let i = renderedCount; i < turn.liveContainer.length; i++) {
+          const block = turn.liveContainer[i];
+          if (block.think) {
+            let html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+            if (!html.trim()) html = esc(block.think);
+            const entry = document.createElement('div');
+            entry.className = 'live-entry markdown-body';
+            entry.dataset.thinkIdx = i;
+            entry.dataset.len = block.think.length;
+            entry.innerHTML = html;
+            log.appendChild(entry);
+          }
+          if (block.tools) {
+            block.tools.forEach(t => {
+              const entry = document.createElement('div');
+              entry.className = 'live-entry markdown-body action-entry';
+              entry.style.animation = 'none';
+              if (t === 'compacting...') {
+                entry.innerHTML = `<p>⚙️ compacting...</p>`;
+              } else {
+                entry.innerHTML = `<p>⚙️ ${esc(t)}</p>`;
+              }
+              log.appendChild(entry);
+            });
+            log.dataset['t_' + i] = block.tools.length;
+          }
+        }
+        log.dataset.count = turn.liveContainer.length;
+      }
+      for (let i = 0; i < Math.min(turn.liveContainer.length, renderedCount); i++) {
+        const block = turn.liveContainer[i];
+        if (block.think) {
+          const thinkNode = log.querySelector(`[data-think-idx="${i}"]`);
+          if (thinkNode) {
+            const currentLen = parseInt(thinkNode.dataset.len || "0", 10);
+            if (block.think.length > currentLen) {
+              thinkNode.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+              thinkNode.dataset.len = block.think.length;
+            }
+          }
+        }
+        if (!block.tools) continue;
+        const toolKey = 't_' + i;
+        const renderedTools = parseInt(log.dataset[toolKey] || "0", 10);
+        if (block.tools.length > renderedTools) {
+          for (let j = renderedTools; j < block.tools.length; j++) {
+            const entry = document.createElement('div');
+            entry.className = 'live-entry markdown-body action-entry';
+            entry.style.animation = 'none';
+            entry.innerHTML = `<p>⚙️ ${esc(block.tools[j])}</p>`;
+            log.appendChild(entry);
+          }
+          log.dataset[toolKey] = block.tools.length;
+        }
+      }
+      if (isScrolledToBottom) {
+        log.scrollTop = log.scrollHeight;
+      }
+    } else {
+      let wrapper = turnGroup.querySelector('.live-container');
+      if (wrapper) wrapper.remove();
+    }
+
+    // 3. Agent Message
+    if (turn.agent || turn.liveContainer.length > 0) {
+      let d = turnGroup.querySelector('.msg.agent');
+      if (!d) {
+        d = document.createElement('div');
+        d.className = 'msg agent';
+        d.innerHTML = `<div class="label">Agent</div><div class="bubble markdown-body"></div>`;
+        turnGroup.appendChild(d);
+      }
+
+      let content = turn.agent || "";
+
+      // Parse all <think> tags from DeepSeek R1/Qwythos (hide completely in final response, but extract to live block)
+      let match;
+      const thinkRegex = /<(?:think|thought)>([\s\S]*?)(<\/(?:think|thought)>|$)/gi;
+      let blockIndex = 0;
+      while ((match = thinkRegex.exec(content)) !== null) {
+        let thinkText = match[1].trim();
+        if (thinkText && !/\[Thought process omitted/i.test(thinkText)) {
+          // Find next available non-error block
+          while (blockIndex < turn.liveContainer.length &&
+            turn.liveContainer[blockIndex].think &&
+            turn.liveContainer[blockIndex].think.startsWith('❌')) {
+            blockIndex++;
+          }
+
+          if (blockIndex >= turn.liveContainer.length) {
+            turn.liveContainer.push({ think: null, tools: [] });
+          }
+
+          if (!turn.liveContainer[blockIndex].think) {
+            turn.liveContainer[blockIndex].think = thinkText;
+          }
+          blockIndex++;
+        }
+      }
+      content = content.replace(/<(?:think|thought)>([\s\S]*?)(<\/(?:think|thought)>|$)/gi, '').trim();
+
+      // If the model put its entire final response inside a <think> block (common with Qwythos),
+      // it would leave the main bubble completely empty. Promote the last thought back to the main bubble.
+      if (!content && turn.completed && turn.liveContainer.length > 0) {
+        const lastIdx = turn.liveContainer.length - 1;
+        const lastBlock = turn.liveContainer[lastIdx];
+        if (lastBlock.think && lastBlock.tools.length === 0) {
+          content = lastBlock.think;
+          
+          // Remove from the live container DOM to prevent it from appearing in both places
+          const log = turnGroup.querySelector('.compact-log');
+          if (log) {
+            const thinkNode = log.querySelector(`[data-think-idx="${lastIdx}"]`);
+            if (thinkNode) thinkNode.remove();
+          }
+        }
+      }
+
+      if (window.marked) {
+        content = md(content);
+      } else {
+        content = esc(content);
+      }
+
+      const bubble = d.querySelector('.bubble');
+      if (bubble) {
+        bubble.innerHTML = content;
+      }
+
+      // Render any UI widgets for changed files
+      if (turn.workspaceChanges) {
+        let changedFiles = [];
+        if (turn.workspaceChanges.created) changedFiles.push(...turn.workspaceChanges.created);
+        if (turn.workspaceChanges.modified) changedFiles.push(...turn.workspaceChanges.modified);
+        if (changedFiles.length > 0 && window.latestArtifacts) {
+          if (!d.dataset.renderedDiffs) {
+            let relevantDiffs = matchingDiffArtifactsForChangedFiles(changedFiles);
+            if (relevantDiffs.length > 0) {
+              renderDiffReviewWidget(d, relevantDiffs);
+              d.dataset.renderedDiffs = "true";
+            }
+          }
+        }
+      }
+      if (!content && !turn.workspaceChanges) {
+        const hasTools = turn.liveContainer.some(b => b.tools && b.tools.length > 0);
+        if (!hasTools) {
+          d.remove();
+        }
+      }
+    } else {
+      let d = turnGroup.querySelector('.msg.agent');
+      if (d) d.remove();
+    }
     _updateTokenDisplay();
   }
 
-   updateTimer() {
+  updateTimer() {
     if (!running) return;
     const s = Math.floor((Date.now() - runStartTime) / 1000);
     const nodes = document.querySelectorAll('.inline-live .timer');
     nodes.forEach(tEl => {
-      tEl.textContent = `[${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}]`;
+      tEl.textContent = `[${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}]`;
     });
   }
 }
@@ -835,48 +970,48 @@ const conversationState = new ConversationState();
 
 // Wrappers for old API
 async function addMsg(role, txt, opts) {
-    if (role.toLowerCase() === 'system') conversationState.addSystemMsg(txt);
-    else if (role.toLowerCase() === 'user') {
-        if (conversationState.turns.length > 0) {
-            conversationState.turns[conversationState.turns.length - 1].completed = true;
-        }
-        conversationState.turns.push({ user: txt, agent: null, liveContainer: [], completed: false, durationMs: 0 });
-        await conversationState.render();
+  if (role.toLowerCase() === 'system') conversationState.addSystemMsg(txt);
+  else if (role.toLowerCase() === 'user') {
+    if (conversationState.turns.length > 0) {
+      conversationState.turns[conversationState.turns.length - 1].completed = true;
     }
-    else if (role.toLowerCase() === 'agent') {
-        const turn = conversationState._currentTurn();
-        turn.agent = txt;
-        await conversationState.render();
-    }
+    conversationState.turns.push({ user: txt, agent: null, liveContainer: [], completed: false, durationMs: 0 });
+    await conversationState.render();
+  }
+  else if (role.toLowerCase() === 'agent') {
+    const turn = conversationState._currentTurn();
+    turn.agent = txt;
+    await conversationState.render();
+  }
 }
 async function updateInlineLive(text, state, opts) {
-    await conversationState.addLiveEvent({ type: 'think', text: text });
+  await conversationState.addLiveEvent({ type: 'think', text: text });
 }
 async function compactLiveTranscript(durationMs) {
-    const turn = conversationState._currentTurn();
-    turn.durationMs = durationMs;
-    turn.completed = true;
-    await conversationState.render();
+  const turn = conversationState._currentTurn();
+  turn.durationMs = durationMs;
+  turn.completed = true;
+  await conversationState.render();
 }
 function updateTimer() {
-    conversationState.updateTimer();
+  conversationState.updateTimer();
 }
 async function renderSession(displayLog, clearDom = true) {
-    await conversationState.loadDb(displayLog, clearDom);
+  await conversationState.loadDb(displayLog, clearDom);
 }
 
 
 function updateSendStopButtons() {
   const editorHasText = textOfEditor().trim() !== '';
   if (running) {
-      $('send').style.display = editorHasText ? 'flex' : 'none';
-      $('stopBtn').style.display = editorHasText ? 'none' : 'flex';
-      $('send').disabled = !projectSelected || stopping;
-      $('stopBtn').disabled = stopping;
+    $('send').style.display = editorHasText ? 'flex' : 'none';
+    $('stopBtn').style.display = editorHasText ? 'none' : 'flex';
+    $('send').disabled = !projectSelected || stopping;
+    $('stopBtn').disabled = stopping;
   } else {
-      $('send').style.display = 'flex';
-      $('stopBtn').style.display = 'none';
-      $('send').disabled = !projectSelected;
+    $('send').style.display = 'flex';
+    $('stopBtn').style.display = 'none';
+    $('send').disabled = !projectSelected;
   }
 }
 
@@ -1103,7 +1238,7 @@ async function refresh() {
     renderBackendDiagnostics(a.backend_diagnostics || {});
     await setRunningState(!!a.running, !!a.stop_requested, a.start_time);
     if (a.artifacts !== undefined) window.latestArtifacts = a.artifacts;
-    
+
     // Auth logic for Logout button
     const logoutBtn = $('logoutBtn');
     if (logoutBtn) {
@@ -1113,7 +1248,7 @@ async function refresh() {
         window.location.href = '/login';
       };
     }
-    
+
     // Sync mode from server (prefer session agent, fall back to config mode)
     const effectiveMode = a.agent || a.mode || 'build';
     if (effectiveMode) {
@@ -1124,7 +1259,7 @@ async function refresh() {
         o.classList.toggle('active', o.dataset.value === effectiveMode);
       });
     }
-    
+
     // Sync token totals from server
     totalTokens = {
       prompt: a.total_prompt_tokens || 0,
@@ -1139,8 +1274,9 @@ async function refresh() {
 
     if (a.projects !== undefined) await renderProjects(a.projects);
     if (firstStatus) {
-      const isInitialLoad = document.getElementById('chat').children.length === 0 || 
-                           (document.getElementById('chat').children.length === 1 && document.getElementById('chat').children[0].classList.contains('system'));
+      const isInitialLoad = document.getElementById('chat').children.length === 0 ||
+        (document.getElementById('chat').children.length === 1 && document.getElementById('chat').children[0].classList.contains('system'));
+
       await renderSession(a.display_log, isInitialLoad);
       firstStatus = false;
       if (a.running) {
@@ -1215,7 +1351,7 @@ function triggerIndex() {
   fetch('/api/workspace/index', { method: 'POST' })
     .then(r => r.json())
     .then(d => { if (!d.ok) console.warn('cbm index:', d.detail || d.error); })
-    .catch(() => {});
+    .catch(() => { });
 }
 
 async function selectProject(path) {
@@ -1296,7 +1432,7 @@ async function uploadFiles(files) {
   });
   setEditorText(t + ' ')
 }
-  // Enhancement: SSE streaming for live activity updates  
+// Enhancement: SSE streaming for live activity updates  
 async function handleAgentEvent(d, isHistory = false) {
   if (d.conversation_id && window.currentConversationId && d.conversation_id !== window.currentConversationId) {
     return; // Filter out live events belonging to a different background session
@@ -1304,7 +1440,7 @@ async function handleAgentEvent(d, isHistory = false) {
   if (isHistory && (d.type === 'think' || d.type === 'action' || d.type === 'token' || d.type === 'response')) {
     return;
   }
-  
+
   if (d.type === 'token_usage') {
     totalTokens.prompt = d.total_prompt || 0;
     totalTokens.completion = d.total_completion || 0;
@@ -1315,7 +1451,7 @@ async function handleAgentEvent(d, isHistory = false) {
     if (!isHistory) await refresh();
     return;
   }
-  
+
   if (d.type === 'error') {
     const errMsg = d.error || d.message || 'An error occurred';
     if (!isHistory) await conversationState.addSystemMsg('⚠️ ' + errMsg);
@@ -1323,48 +1459,49 @@ async function handleAgentEvent(d, isHistory = false) {
     clearInterval(poll); poll = null;
     await setRunningState(false, false);
     if (!isHistory) {
-       const t = conversationState._currentTurn();
-       t.completed = true;
-       await conversationState.render();
+      const t = conversationState._currentTurn();
+      t.completed = true;
+      await conversationState.render();
     }
     firstStatus = true;
     if (!isHistory) await refresh();
     return;
   }
-  
+
   if (d.type === 'complete') {
-     _notifQueued = true;
-     if (!isHistory) _playNotificationSound();
-     
-      if (d.response && d.reason !== 'cancelled') {
-          await conversationState.addLiveEvent({ type: 'token', text: d.response });
+
+    _notifQueued = true;
+    if (!isHistory) _playNotificationSound();
+
+    if (d.response && d.reason !== 'cancelled') {
+      await conversationState.addLiveEvent({ type: 'replace_content', content: d.response });
+    }
+    await conversationState.addLiveEvent({
+      type: 'done',
+      duration_ms: d.duration_ms,
+      workspace_changes: d.workspace_changes
+    });
+
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
+    }
+    clearInterval(poll);
+    poll = null;
+    await setRunningState(false, false);
+    firstStatus = true;
+    if (!isHistory) {
+      // Wait 500ms for the backend to commit final db records (snapshot ID, run_meta)
+      await new Promise(r => setTimeout(r, 500));
+      await refresh();
+      await conversationState.render();
+      if (typeof loadExplorerList === 'function' && typeof explorerPath !== 'undefined') {
+        loadExplorerList(explorerPath);
       }
-      await conversationState.addLiveEvent({ 
-          type: 'done', 
-          duration_ms: d.duration_ms, 
-          workspace_changes: d.workspace_changes 
-      });
-     
-     if (sseSource) {
-       sseSource.close();
-       sseSource = null;
-     }
-     clearInterval(poll);
-     poll = null;
-     await setRunningState(false, false);
-     firstStatus = true;
-      if (!isHistory) {
-        // Wait 500ms for the backend to commit final db records (snapshot ID, run_meta)
-        await new Promise(r => setTimeout(r, 500));
-        await refresh();
-        await conversationState.render();
-        if (typeof loadExplorerList === 'function' && typeof explorerPath !== 'undefined') {
-          loadExplorerList(explorerPath);
-        }
-      }
-     return;
+    }
+    return;
   }
-  
+
   if (d.type === 'prompt') {
     if (!isHistory) {
       $('promptToolName').innerText = d.tool || 'unknown';
@@ -1374,7 +1511,7 @@ async function handleAgentEvent(d, isHistory = false) {
       }
       $('promptToolCommand').innerText = cmdDisplay;
       $('toolPromptModal').classList.add('open');
-      
+
       const handleDecision = async (approve) => {
         $('toolPromptModal').classList.remove('open');
         $('promptApproveBtn').onclick = null;
@@ -1387,13 +1524,13 @@ async function handleAgentEvent(d, isHistory = false) {
           });
         } catch (e) { console.error('Failed to send tool approval', e); }
       };
-      
+
       $('promptApproveBtn').onclick = () => handleDecision(true);
       $('promptRejectBtn').onclick = () => handleDecision(false);
     }
     return;
   }
-  
+
   // Default pass-through to new state manager
   await conversationState.addLiveEvent(d);
 }
@@ -1401,7 +1538,7 @@ async function sseOnMessage(e) {
   try {
     const d = JSON.parse(e.data);
     await handleAgentEvent(d, false);
-  } catch (ex) {}
+  } catch (ex) { }
 }
 
 async function sseOnError() {
@@ -1426,7 +1563,8 @@ async function sseOnError() {
           await refresh();
         };
       } catch (ex) {
-        /* stay on poll fallback */ }
+        /* stay on poll fallback */
+      }
     }
   }, 2000);
 }
@@ -1440,14 +1578,14 @@ async function send() {
     return
   }
   if (!text) return;
-  
+
   if (running) {
     isSending = true;
     try {
       const r = await fetch('/api/chat/followup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text })
+        body: JSON.stringify({ prompt: text, conversation_id: window.currentConversationId })
       });
       const data = await r.json();
       if (r.ok && data.ok) {
@@ -1465,7 +1603,7 @@ async function send() {
     }
     return;
   }
-  
+
   isSending = true;
 
   await addMsg('User', text);
@@ -1494,7 +1632,8 @@ async function send() {
       body: JSON.stringify({
         prompt: text,
         mode: intentMode,
-        features: mergedFeatures()
+        features: mergedFeatures(),
+        conversation_id: window.currentConversationId
       }),
       signal: runAbort.signal
     });
@@ -1585,20 +1724,20 @@ async function openProjectModal() {
   $('customSelectText').textContent = '-- Select an existing folder --';
   $('customSelectDropdown').innerHTML = '';
   $('customSelectDropdown').style.display = 'none';
-  
+
   $('customSelectDisplay').onclick = () => {
     const dd = $('customSelectDropdown');
     dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
   };
-  
+
   // Close dropdown when clicking outside
   document.addEventListener('click', function _closeDropdown(e) {
     if (!$('projectModal').classList.contains('open')) {
-        document.removeEventListener('click', _closeDropdown);
-        return;
+      document.removeEventListener('click', _closeDropdown);
+      return;
     }
     if (!e.target.closest('#customSelectWrapper')) {
-        $('customSelectDropdown').style.display = 'none';
+      $('customSelectDropdown').style.display = 'none';
     }
   });
 
@@ -1625,10 +1764,10 @@ async function openProjectModal() {
         $('customSelectDropdown').appendChild(div);
       });
     }
-  } catch(e) {
+  } catch (e) {
     console.error('Failed to load available workspaces', e);
   }
-  
+
   $('projectModal').classList.add('open');
 }
 
@@ -1670,7 +1809,7 @@ async function openSettings() {
       if (c.providers && c.providers.length > 0) {
         c.providers.forEach((p, idx) => addProviderUI(p, idx === 0));
       } else {
-        addProviderUI({base_url: '', api_key: ''}, true);
+        addProviderUI({ base_url: '', api_key: '' }, true);
       }
       if (c.shell_access === 'ask') {
         $('cfgShellAccess').value = 'ask';
@@ -1752,7 +1891,7 @@ function addProviderUI(p, isPrimary) {
       const pcContainer = $('providersContainer');
       const allDivs = Array.from(pcContainer.querySelectorAll('.provider-item'));
       const oldIndex = allDivs.indexOf(div);
-      
+
       const pList = allDivs.map((el) => {
         return {
           id: el.dataset.id,
@@ -1770,7 +1909,7 @@ function addProviderUI(p, isPrimary) {
 
       pcContainer.innerHTML = '';
       pList.forEach((p, idx) => addProviderUI(p, idx === 0));
-      
+
       // Automatically save settings so the new primary takes effect immediately
       $('settingsSave').click();
     };
@@ -1805,7 +1944,7 @@ function addProviderUI(p, isPrimary) {
   pc.appendChild(div);
 }
 
-$('addProviderBtn').onclick = () => addProviderUI({base_url: '', api_key: ''}, false);
+$('addProviderBtn').onclick = () => addProviderUI({ base_url: '', api_key: '' }, false);
 
 $('settingsBtn').onclick = openSettings;
 $('settingsClose').onclick = () => $('settingsModal').classList.remove('open');
@@ -1853,7 +1992,7 @@ async function openMcpSettings() {
         addMcpUI(id, srv);
       }
     } else {
-      addMcpUI('my-mcp', {command: ['npx', '-y', '@modelcontextprotocol/server-postgres'], environment: {}});
+      addMcpUI('my-mcp', { command: ['npx', '-y', '@modelcontextprotocol/server-postgres'], environment: {} });
     }
   } catch (e) {
     console.error('Failed to load mcp config', e);
@@ -1902,7 +2041,7 @@ DATABASE_URL=postgres://...">${esc(envStr)}</textarea>
 
 $('openMcpModalBtn').onclick = openMcpSettings;
 $('mcpClose').onclick = () => $('mcpModal').classList.remove('open');
-$('addMcpBtn').onclick = () => addMcpUI('new-mcp', {command: [], environment: {}});
+$('addMcpBtn').onclick = () => addMcpUI('new-mcp', { command: [], environment: {} });
 
 $('mcpSave').onclick = async () => {
   const servers = {};
@@ -1912,10 +2051,10 @@ $('mcpSave').onclick = async () => {
     const cmdStr = el.querySelector('.mcp-cmd').value.trim();
     const envStr = el.querySelector('.mcp-env').value;
     const disabled = el.querySelector('.mcp-disabled').checked;
-    
+
     // Split command by space
     const command = cmdStr ? cmdStr.split(' ').filter(c => c) : [];
-    
+
     // Parse env
     const environment = {};
     envStr.split('\n').forEach(line => {
@@ -2035,9 +2174,9 @@ modeMenu.addEventListener('click', e => {
   localStorage.setItem('qf_intent_mode', value);
   fetch('/api/config/mode', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({mode: value})
-  }).catch(() => {});
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: value })
+  }).catch(() => { });
   updateModelTag();
 });
 
@@ -2063,12 +2202,12 @@ if ($('newChatBtn')) $('newChatBtn').onclick = async () => {
   const r = await fetch('/api/chat/new', {
     method: 'POST'
   });
-          const d = await r.json();
-          if (d.ok) await renderSession(d.display_log);
-          await refresh();
-          document.querySelector('.col.left').classList.remove('open');
-          document.body.classList.remove('drawer-open');
-        };
+  const d = await r.json();
+  if (d.ok) await renderSession(d.display_log);
+  await refresh();
+  document.querySelector('.col.left').classList.remove('open');
+  document.body.classList.remove('drawer-open');
+};
 
 // Mobile Drawers
 if ($('menuToggle')) $('menuToggle').onclick = () => {
@@ -2130,7 +2269,7 @@ let uiRunTimeoutSeconds = 3600;
 let currentArtifactWorkspace = 'global';
 
 function artifactKey(suffix) {
-  return `qf_artifacts_${suffix}:${currentArtifactWorkspace||'global'}`
+  return `qf_artifacts_${suffix}:${currentArtifactWorkspace || 'global'}`
 }
 
 function artifactDismissed() {
@@ -2399,8 +2538,8 @@ function renderPlainArtifactList(container, artifacts, title = 'Documents') {
     const el = document.createElement('div');
     el.className = 'artifact-item';
     el.innerHTML = `
-      <div class="artifact-item-title">${esc(art.title)}${art.version_count?` <span style="color:var(--text-muted);font-size:11px;">v${art.version_count+1}</span>`:''}</div>
-      <div class="artifact-item-preview">${esc(String(art.content||'').replace(/<[^>]+>/g,'').substring(0,70))}...</div>
+      <div class="artifact-item-title">${esc(art.title)}${art.version_count ? ` <span style="color:var(--text-muted);font-size:11px;">v${art.version_count + 1}</span>` : ''}</div>
+      <div class="artifact-item-preview">${esc(String(art.content || '').replace(/<[^>]+>/g, '').substring(0, 70))}...</div>
     `;
     el.classList.toggle('markdown-artifact-item', isMarkdownArtifact(art));
     el.onclick = () => viewArtifact(art);
@@ -2424,7 +2563,7 @@ function renderDiffReviewWidget(container, diffArtifacts) {
     </summary>
     <div class="diff-widget-file-list"></div>
   `;
-  
+
   widget.addEventListener('toggle', () => {
     const arrow = widget.querySelector('.diff-widget-arrow');
     if (arrow) arrow.style.transform = widget.open ? 'rotate(90deg)' : 'rotate(0deg)';
@@ -2441,7 +2580,7 @@ function renderDiffReviewWidget(container, diffArtifacts) {
       <span class="diff-widget-file-icon ${esc(icon.cls)}">${esc(icon.label)}</span>
       <span class="diff-widget-file-main">
         <span class="diff-widget-filename">${esc(filename)}</span>
-        ${dir?`<span class="diff-widget-filepath">${esc(dir)}</span>`:''}
+        ${dir ? `<span class="diff-widget-filepath">${esc(dir)}</span>` : ''}
       </span>
       <span class="diff-widget-line-stats"><span class="diff-widget-additions">+${file.additions}</span><span class="diff-widget-deletions">-${file.deletions}</span></span>
       <button type="button" class="diff-widget-revert-btn" title="Revert file to previous state">
@@ -2458,7 +2597,7 @@ function renderDiffReviewWidget(container, diffArtifacts) {
             const res = await fetch('/api/chat/revert-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message_id: msgId, path: file.path })
+              body: JSON.stringify({ message_id: msgId, path: file.path, conversation_id: window.currentConversationId })
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
@@ -2576,7 +2715,7 @@ let cmEditor = null;
 
 function getCodeMirrorMode(path) {
   const ext = path.split('.').pop().toLowerCase();
-  switch(ext) {
+  switch (ext) {
     case 'js': case 'json': return 'javascript';
     case 'py': return 'python';
     case 'html': return 'htmlmixed';
@@ -2592,7 +2731,7 @@ $('artifactEditBtn').onclick = () => {
   const body = $('artifactBody');
   body.classList.add('editing');
   body.innerHTML = '';
-  
+
   cmEditor = CodeMirror(body, {
     value: currentArtifactRaw,
     mode: getCodeMirrorMode(currentArtifactPath),
@@ -2603,8 +2742,8 @@ $('artifactEditBtn').onclick = () => {
     indentUnit: 2,
     tabSize: 2,
     extraKeys: {
-      "Cmd-S": function(cm) { $('artifactSaveBtn').click(); },
-      "Ctrl-S": function(cm) { $('artifactSaveBtn').click(); }
+      "Cmd-S": function (cm) { $('artifactSaveBtn').click(); },
+      "Ctrl-S": function (cm) { $('artifactSaveBtn').click(); }
     }
   });
   // Ensure CodeMirror fills the container
@@ -2638,13 +2777,13 @@ function updateStickyPrompts() {
   if (!chat) return;
   const chatRect = chat.getBoundingClientRect();
   const prompts = document.querySelectorAll('.msg.user');
-  
+
   const scrollTop = chat.scrollTop;
   let visiblePrompts = [];
-  
+
   prompts.forEach(p => {
     const rect = p.getBoundingClientRect();
-    
+
     if (p.parentElement) {
       const parent = p.parentElement;
       // Get parent's offsetTop relative to chat container
@@ -2654,10 +2793,10 @@ function updateStickyPrompts() {
         parentOffsetTop += curr.offsetTop;
         curr = curr.offsetParent;
       }
-      
+
       const isSticking = scrollTop > (parentOffsetTop - 14);
       const currentlySticking = p.classList.contains('sticking');
-      
+
       if (isSticking) {
         if (!currentlySticking) {
           const h = p.offsetHeight;
@@ -2697,10 +2836,10 @@ document.addEventListener('click', e => {
         document.body.appendChild(textArea);
         textArea.focus();
         textArea.select();
-        try { document.execCommand('copy'); } catch (err) {}
+        try { document.execCommand('copy'); } catch (err) { }
         document.body.removeChild(textArea);
       }
-      
+
       const originalHtml = btn.innerHTML;
       btn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
       setTimeout(() => {
@@ -2872,7 +3011,7 @@ if (explorerBreadcrumbEl) {
   });
 }
 
-window.openWorkspaceFile = async function(path) {
+window.openWorkspaceFile = async function (path) {
   try {
     const res = await fetch('/api/workspace/file?path=' + encodeURIComponent(path));
     const data = await res.json();
@@ -2892,7 +3031,7 @@ window.openWorkspaceFile = async function(path) {
   }
 };
 
-window.deleteExplorerItem = async function(path, isDir) {
+window.deleteExplorerItem = async function (path, isDir) {
   const msg = isDir
     ? `Are you sure you want to delete the folder "${path}" and all its contents?`
     : `Are you sure you want to delete the file "${path}"?`;
@@ -2913,7 +3052,7 @@ window.deleteExplorerItem = async function(path, isDir) {
   });
 };
 
-window.showPromptModal = function(title, text, defaultValue, callback) {
+window.showPromptModal = function (title, text, defaultValue, callback) {
   const modal = $('promptModal');
   if (!modal) return callback(prompt(text, defaultValue));
   $('promptTitle').textContent = title;
@@ -3070,7 +3209,7 @@ async function openEmbeddingSettings() {
       $('cfgEmbeddingModel').value = '';
       $('cfgEmbeddingAPIKey').value = '';
     }
-  } catch(e) {
+  } catch (e) {
     console.error(e);
   }
   $('embeddingModal').classList.add('open');
@@ -3088,17 +3227,17 @@ $('embeddingSave').onclick = async () => {
   try {
     await fetch('/api/config/embedding', {
       method: 'POST',
-      headers:{'Content-Type':'application/json'},
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
     $('embeddingModal').classList.remove('open');
     showNotification("Embedding settings saved", "success");
-  } catch(e) {
+  } catch (e) {
     showNotification("Error saving embedding settings", "error");
   }
 };
 
-window.showNotification = function(msg, type = 'info') {
+window.showNotification = function (msg, type = 'info') {
   const notif = document.createElement('div');
   notif.textContent = msg;
   notif.style.position = 'fixed';
@@ -3114,13 +3253,13 @@ window.showNotification = function(msg, type = 'info') {
   notif.style.transition = 'opacity 0.3s ease';
   notif.style.fontFamily = 'system-ui, -apple-system, sans-serif';
   notif.style.fontWeight = '500';
-  
+
   document.body.appendChild(notif);
-  
+
   requestAnimationFrame(() => {
     notif.style.opacity = '1';
   });
-  
+
   setTimeout(() => {
     notif.style.opacity = '0';
     setTimeout(() => notif.remove(), 300);

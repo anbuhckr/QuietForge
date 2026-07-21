@@ -91,7 +91,7 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 
 	// Try git apply first
 	var gitErr bytes.Buffer
-	gitCmd := exec.CommandContext(execCtx, "git", "apply", patchFile)
+	gitCmd := exec.CommandContext(execCtx, "git", "apply", "--recount", "--whitespace=fix", patchFile)
 	gitCmd.Dir = workspace
 	gitCmd.Stderr = &gitErr
 	if gitCmd.Run() == nil {
@@ -100,7 +100,7 @@ func (t *ApplyPatchTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.Tool
 
 	// Fall back to patch utility
 	var patchErr bytes.Buffer
-	patchCmd := exec.CommandContext(execCtx, "patch", "-p1", "-i", patchFile)
+	patchCmd := exec.CommandContext(execCtx, "patch", "-p1", "--fuzz=3", "-i", patchFile)
 	patchCmd.Dir = workspace
 	patchCmd.Stderr = &patchErr
 	if patchCmd.Run() == nil {

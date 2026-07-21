@@ -26,7 +26,7 @@ func (t *GrepTool) ID() string {
 }
 
 func (t *GrepTool) Description() string {
-	return "Search file contents using regular expressions. Returns matching file paths and line numbers."
+	return "CRITICAL: Do NOT use this tool to find function or class definitions (use `ast_search` instead). Use grep ONLY to search file contents for exact string literals or error messages using regular expressions."
 }
 
 func (t *GrepTool) Parameters() map[string]interface{} {

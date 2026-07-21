@@ -33,7 +33,7 @@ func (t *AstSearchTool) ID() string {
 }
 
 func (t *AstSearchTool) Description() string {
-	return "Semantic code search using Tree-sitter. Finds functions, methods, classes, structs, and interfaces across multiple languages."
+	return "CRITICAL: ALWAYS use this tool INSTEAD of grep whenever you need to find where a function, method, class, or struct is defined. Semantic code search using Tree-sitter."
 }
 
 func (t *AstSearchTool) Parameters() map[string]interface{} {

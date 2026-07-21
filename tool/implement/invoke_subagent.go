@@ -28,7 +28,7 @@ func (t *InvokeSubagentTool) Parameters() map[string]interface{} {
 					"type": "object",
 					"properties": map[string]interface{}{
 						"prompt": map[string]interface{}{"type": "string", "description": "Detailed task prompt for the sub-agent"},
-						"subagent_type": map[string]interface{}{"type": "string", "description": "Type of sub-agent to use"},
+						"subagent_type": map[string]interface{}{"type": "string", "description": "Type of sub-agent to use (e.g., 'build', 'browser', 'plan'). Use 'browser' for automated UI testing and visual debugging tasks."},
 					},
 					"required": []string{"prompt", "subagent_type"},
 				},

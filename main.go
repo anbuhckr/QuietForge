@@ -545,7 +545,7 @@ func addLiveEvent(typ string, data map[string]any) {
 		liveEvents = liveEvents[len(liveEvents)-maxLiveEvents:]
 	}
 	debugLog("addLiveEvent: type=%s msg=%.60s liveEvents=%d", typ, msg, len(liveEvents))
-	go broadcastEvent(entry)
+	broadcastEvent(entry)
 }
 
 var subscribers []chan map[string]any
@@ -665,12 +665,8 @@ func loadLatestSession(ws string) {
 		d.Close()
 		return
 	}
-	if len(s.GetHistory()) > 0 {
-		activeConversation = latest.ID
-		activeSession = s
-	} else {
-		d.Close()
-	}
+	activeConversation = latest.ID
+	activeSession = s
 }
 
 func buildTree(dirPath, workspaceRoot string) []map[string]any {
@@ -742,7 +738,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.2")
+		fmt.Println("QuietForge v1.1.3")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1541,13 +1537,17 @@ func setupChatRoutes(api fiber.Router) {
 
 	api.Post("/chat/revert", func(c *fiber.Ctx) error {
 		payload := new(struct {
-			MessageID string `json:"message_id"`
+			MessageID      string `json:"message_id"`
+			ConversationID string `json:"conversation_id"`
 		})
 		if err := c.BodyParser(payload); err != nil || payload.MessageID == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "message_id is required"})
 		}
 		if activeSession == nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
+		}
+		if payload.ConversationID != "" && payload.ConversationID != activeSession.SessionID {
+			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh the page."})
 		}
 		debugLog("/chat/revert: messageID=%s", payload.MessageID)
 		msgs := activeSession.GetHistory()
@@ -1597,11 +1597,13 @@ func setupChatRoutes(api fiber.Router) {
 				}
 			}
 			// Clean up Git tags for reverted snapshots to prevent stale refs
-			if snapRaw, ok := m.Metadata["snapshot"]; ok {
-				if snapHash, ok := snapRaw.(string); ok && snapHash != "" {
-					tagDel := exec.Command("git", "tag", "-d", "quietforge-"+snapHash)
-					tagDel.Dir = ws
-					tagDel.Run()
+			if m.CreatedAt > targetMsg.CreatedAt {
+				if snapRaw, ok := m.Metadata["snapshot"]; ok {
+					if snapHash, ok := snapRaw.(string); ok && snapHash != "" {
+						tagDel := exec.Command("git", "tag", "-d", "quietforge-"+snapHash)
+						tagDel.Dir = ws
+						tagDel.Run()
+					}
 				}
 			}
 		}
@@ -1614,14 +1616,18 @@ func setupChatRoutes(api fiber.Router) {
 
 	api.Post("/chat/revert-file", func(c *fiber.Ctx) error {
 		payload := new(struct {
-			Path      string `json:"path"`
-			MessageID string `json:"message_id"`
+			Path           string `json:"path"`
+			MessageID      string `json:"message_id"`
+			ConversationID string `json:"conversation_id"`
 		})
 		if err := c.BodyParser(payload); err != nil || payload.Path == "" || payload.MessageID == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "message_id and path are required"})
 		}
 		if activeSession == nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
+		}
+		if payload.ConversationID != "" && payload.ConversationID != activeSession.SessionID {
+			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh the page."})
 		}
 		msgs := activeSession.GetHistory()
 		var targetMsg *session.Message
@@ -2707,9 +2713,14 @@ func setupStreamRoutes(api fiber.Router) {
 			return c.Status(400).JSON(fiber.Map{"error": "No active session."})
 		}
 		payload := new(struct {
-			Prompt string `json:"prompt"`
+			Prompt         string `json:"prompt"`
+			ConversationID string `json:"conversation_id"`
 		})
 		c.BodyParser(payload)
+
+		if payload.ConversationID != "" && activeSession != nil && payload.ConversationID != activeSession.SessionID {
+			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh."})
+		}
 
 		activeSession.QueueFollowup(payload.Prompt)
 		activeSession.Save()
@@ -2723,10 +2734,11 @@ func setupStreamRoutes(api fiber.Router) {
 			return c.Status(409).JSON(fiber.Map{"error": "Engine is already running."})
 		}
 		payload := new(struct {
-			Message      string `json:"message"`
-			Prompt       string `json:"prompt"`
-			Agent        string `json:"agent"`
-			SystemPrompt string `json:"system_prompt"`
+			Message        string `json:"message"`
+			Prompt         string `json:"prompt"`
+			Agent          string `json:"agent"`
+			SystemPrompt   string `json:"system_prompt"`
+			ConversationID string `json:"conversation_id"`
 		})
 		c.BodyParser(payload)
 		if payload.Message == "" && payload.Prompt == "" {
@@ -2748,6 +2760,14 @@ func setupStreamRoutes(api fiber.Router) {
 			}
 		}
 		debugLog("/run: message=%.80s agent=%s systemPrompt_len=%d", msg, payload.Agent, len(payload.SystemPrompt))
+
+		if payload.ConversationID != "" && payload.ConversationID != activeConversation {
+			sessionMu.Lock()
+			activeConversation = payload.ConversationID
+			activeSession = nil
+			sessionMu.Unlock()
+			debugLog("/run: synced activeConversation from UI payload: %s", activeConversation)
+		}
 
 		eventsMu.Lock()
 		liveEvents = nil
@@ -2893,7 +2913,7 @@ func spawnSubagent(prompt, agentType, parentSessionID string) (string, <-chan st
 		}()
 		ctx := context.Background()
 		runSubEngine(ctx, subSession, prompt, agentType, parentSessionID, worktreePath, wm, branchName)
-		
+
 		report := "Subagent failed or returned no response."
 		msgs := subSession.GetHistory()
 		for i := len(msgs) - 1; i >= 0; i-- {
@@ -3553,12 +3573,6 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		var cycleContent string
 		var thoughtBuffer string
 		var toolCalls []provider.ToolCall
-		flushThought := func() {
-			if tb := strings.TrimSpace(thoughtBuffer); tb != "" {
-				addLiveEvent("think", map[string]any{"text": tb, "event": tb})
-				thoughtBuffer = ""
-			}
-		}
 
 		// Try streaming first
 		toolDefs := buildOpenAIToolDefs(agentID)
@@ -3595,21 +3609,30 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 						cycleContent += evt.Text
 						fullContent += evt.Text
 						thoughtBuffer += evt.Text
+						addLiveEvent("think", map[string]any{"text": evt.Text, "event": evt.Text})
 					case "text":
 						if isReasoning {
 							isReasoning = false
 							cycleContent += "\n</think>\n"
 							fullContent += "\n</think>\n"
 						}
+						// If the provider pre-filled <think> (e.g. Qwythos), the API stream omits it.
+						// We must inject it so the frontend can parse the thought block properly.
+						if len(cycleContent) == 0 && !hasReceivedReasoning && !strings.HasPrefix(evt.Text, "<think>") {
+							cycleContent += "<think>\n"
+							fullContent += "<think>\n"
+							thoughtBuffer += "<think>\n"
+							addLiveEvent("token", map[string]any{"event": "<think>\n"})
+						}
 						cycleContent += evt.Text
 						fullContent += evt.Text
 						if !hasReceivedReasoning {
 							thoughtBuffer += evt.Text
 						}
+						addLiveEvent("token", map[string]any{"event": evt.Text})
 					case "tool_use":
 						if !hasToolCall {
 							hasToolCall = true
-							flushThought()
 						}
 						if evt.ToolCall != nil {
 							toolCalls = append(toolCalls, *evt.ToolCall)
@@ -3637,6 +3660,8 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			}
 		}
 
+		originalCycleContent := cycleContent
+
 		// Deduplicate proxy <think> mirroring
 		if strings.Count(cycleContent, "<think>") > 1 {
 			// If the proxy mirrored reasoning_content into content, we strip the second one
@@ -3647,9 +3672,47 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		// DeepSeek R1 produces <tool_calls> blocks in content alongside delta.ToolCalls; strip them
 		cycleContent = regexp.MustCompile(`(?is)<tool_calls>.*?</tool_calls>`).ReplaceAllString(cycleContent, "")
 
-		// Fix DeepSeek R1 random <think> omissions
-		if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
+		// Fix Qwythos leaking text before tool calls — wrap unwrapped text only, preserve existing think tags
+		if len(toolCalls) > 0 && len(strings.TrimSpace(cycleContent)) > 0 {
+			if strings.Contains(cycleContent, "<think>") {
+				reThink := regexp.MustCompile(`(?is)(<think>.*?</think>)`)
+				nonThinkText := reThink.ReplaceAllString(cycleContent, "")
+				if strings.TrimSpace(nonThinkText) != "" {
+					segments := reThink.Split(cycleContent, -1)
+					thinkBlocks := reThink.FindAllString(cycleContent, -1)
+					for i, part := range segments {
+						part = strings.TrimSpace(part)
+						if part != "" {
+							segments[i] = "<think>\n" + part + "\n</think>\n"
+						} else {
+							segments[i] = ""
+						}
+					}
+					var buf strings.Builder
+					for i, seg := range segments {
+						buf.WriteString(seg)
+						if i < len(thinkBlocks) {
+							buf.WriteString(thinkBlocks[i])
+						}
+					}
+					cycleContent = buf.String()
+				}
+				// If no non-think text, keep cycleContent as-is
+			} else {
+				cycleContent = "<think>\n" + strings.TrimSpace(cycleContent) + "\n</think>\n"
+			}
+		} else if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
+			// Fix DeepSeek R1 random <think> omissions
 			cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
+		}
+
+		if cycleContent != originalCycleContent {
+			if strings.HasSuffix(fullContent, originalCycleContent) {
+				fullContent = strings.TrimSuffix(fullContent, originalCycleContent) + cycleContent
+			} else {
+				fullContent = strings.Replace(fullContent, originalCycleContent, cycleContent, 1)
+			}
+			addLiveEvent("replace_content", map[string]any{"content": fullContent})
 		}
 
 		debugLog("runEngine: cycle %d stream done: content=%d toolCalls=%d", i, len(cycleContent), len(toolCalls))
@@ -3676,12 +3739,6 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			activeSession.Save()
 			return
 		default:
-		}
-
-		if hasToolCall {
-			flushThought()
-		} else if thoughtBuffer != "" {
-			addLiveEvent("token", map[string]any{"event": cycleContent})
 		}
 
 		if cycleContent == "" && len(toolCalls) == 0 {

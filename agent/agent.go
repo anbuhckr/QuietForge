@@ -26,6 +26,7 @@ const (
 	AgentCompaction = "compaction"
 	AgentTitle      = "title"
 	AgentSummary    = "summary"
+	AgentBrowser    = "browser"
 )
 
 var (
@@ -107,6 +108,19 @@ var BuiltinAgents = map[string]*AgentDefinition{
 			"glob":        	"allowed",
 			"webfetch": 	"allowed",
 			"websearch":    "allowed",
+		},
+	},
+	AgentBrowser: {
+		ID:                   AgentBrowser,
+		Name:                 "Browser",
+		SystemPromptTemplate: "browser_system",
+		Tools:                []string{"mcp", "read", "webfetch", "websearch", "invalid"},
+		PermissionProfiles: map[string]string{
+			"mcp":       "allowed",
+			"read":      "allowed",
+			"webfetch":  "allowed",
+			"websearch": "allowed",
+			"invalid":   "allowed",
 		},
 	},
 	AgentCompaction: {

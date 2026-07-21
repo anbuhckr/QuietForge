@@ -21,7 +21,7 @@ func (t *EditTool) ID() string {
 }
 
 func (t *EditTool) Description() string {
-	return "Edit an existing file using either exact string replacement (oldString) OR exact line-range replacement (startLine, endLine). Line-range (startLine/endLine) is HIGHLY RECOMMENDED to avoid strict whitespace mismatch errors which often cause tool loops."
+	return "Edit an existing file using a search and replace block (oldString/newString). The tool uses a Fuzzy Matcher, so you do NOT need to worry about exact indentation or whitespace in your oldString, just provide the raw code logic to replace. Alternatively, you can use exact line-range replacement (startLine, endLine)."
 }
 
 func (t *EditTool) Parameters() map[string]interface{} {
@@ -56,14 +56,13 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 	hasStart := params.StartLine != nil
 	hasEnd := params.EndLine != nil
 
-	if hasOld && (hasStart || hasEnd) {
-		return &tool.ToolResult{
-			Error:  "invalid_args",
-			Output: "Specify either oldString or startLine/endLine, not both.",
-		}, nil
-	}
-
-	if hasStart != hasEnd {
+	if hasStart && hasEnd {
+		hasOld = false // Prioritize line-range replacement and ignore oldString to help small models
+	} else if hasOld {
+		// If oldString is provided but line range is incomplete, just use oldString
+		hasStart = false
+		hasEnd = false
+	} else if hasStart != hasEnd {
 		return &tool.ToolResult{
 			Error:  "invalid_args",
 			Output: "Both startLine and endLine must be provided together.",
@@ -129,7 +128,7 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		old := strings.ReplaceAll(*params.OldString, "\r\n", "\n")
 		if params.ReplaceAll {
 			if !strings.Contains(content, old) {
-				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s. ERROR: Your oldString must exactly match the file character-for-character including whitespace and indentation. Do not hallucinate or guess whitespace! If you are struggling, use line-range (startLine/endLine) replacement instead, which is much more reliable.", params.FilePath)}, nil
+				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s. Exact match failed and replaceAll does not support fuzzy matching.", params.FilePath)}, nil
 			}
 			newContent = strings.ReplaceAll(content, old, newString)
 			if newContent == content {
@@ -140,16 +139,25 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 		} else {
 			count = strings.Count(content, old)
 			if count > 1 {
-				return &tool.ToolResult{Error: "multiple_matches", Output: fmt.Sprintf("Found %d matches. Use replaceAll or provide more context.", count)}, nil
+				return &tool.ToolResult{Error: "multiple_matches", Output: fmt.Sprintf("Found %d matches for exact oldString. Provide more context to make it unique.", count)}, nil
 			}
 			if count == 0 {
-				return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s. ERROR: Your oldString must exactly match the file character-for-character including whitespace and indentation. Do not hallucinate or guess whitespace! If you are struggling, use line-range (startLine/endLine) replacement instead, which is much more reliable.", params.FilePath)}, nil
-			}
-			newContent = strings.Replace(content, old, newString, 1)
-			if newContent == content {
-				count = 0
+				var fuzzyCount int
+				newContent, fuzzyCount = doFuzzyReplace(content, old, newString)
+				if fuzzyCount == 1 {
+					count = 1
+				} else if fuzzyCount > 1 {
+					return &tool.ToolResult{Error: "multiple_matches", Output: fmt.Sprintf("Fuzzy matcher found %d matches for your oldString. Please provide a few more lines of surrounding code in your oldString to make it unique.", fuzzyCount)}, nil
+				} else {
+					return &tool.ToolResult{Error: "not_found", Output: fmt.Sprintf("oldString not found in %s. Both exact match and fuzzy match failed to find a matching block of code. Please read the file again to ensure you are targeting the correct code.", params.FilePath)}, nil
+				}
 			} else {
-				count = 1
+				newContent = strings.Replace(content, old, newString, 1)
+				if newContent == content {
+					count = 0
+				} else {
+					count = 1
+				}
 			}
 		}
 	} else {
@@ -193,8 +201,104 @@ func (t *EditTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResult
 // characters and empty lines (including a trailing empty line from a final \n).
 func splitLinesKeepEnds(s string) []string {
 	lines := strings.SplitAfter(s, "\n")
-	// strings.SplitAfter on "a\nb\n" produces ["a\n", "b\n"] — correct
-	// strings.SplitAfter on "a\nb" produces ["a\n", "b"] — correct
-	// strings.SplitAfter on "" produces [""] — correct for empty input
 	return lines
+}
+
+func doFuzzyReplace(content, oldString, newString string) (string, int) {
+	oldLines := strings.Split(oldString, "\n")
+	var target []string
+	for _, l := range oldLines {
+		t := strings.TrimSpace(l)
+		if t != "" {
+			target = append(target, t)
+		}
+	}
+	if len(target) == 0 {
+		return content, 0
+	}
+
+	contentLines := splitLinesKeepEnds(content)
+	var matches [][]int
+	
+	for i := 0; i < len(contentLines); i++ {
+		t := strings.TrimSpace(contentLines[i])
+		if t == "" { continue }
+		
+		if t == target[0] {
+			matchLen := 1
+			j := i + 1
+			for matchLen < len(target) && j < len(contentLines) {
+				tj := strings.TrimSpace(contentLines[j])
+				if tj == "" {
+					j++
+					continue
+				}
+				if tj == target[matchLen] {
+					matchLen++
+					j++
+				} else {
+					break
+				}
+			}
+			if matchLen == len(target) {
+				matches = append(matches, []int{i, j - 1})
+			}
+		}
+	}
+	
+	if len(matches) == 1 {
+		startIdx := matches[0][0]
+		endIdx := matches[0][1]
+		
+		baseIndent := getIndentation(contentLines[startIdx])
+		
+		newLines := splitLinesKeepEnds(newString)
+		var commonIndent *string
+		for _, l := range newLines {
+			if strings.TrimSpace(l) == "" { continue }
+			ind := getIndentation(l)
+			if commonIndent == nil {
+				commonIndent = &ind
+			} else {
+				if len(ind) < len(*commonIndent) {
+					*commonIndent = ind
+				}
+			}
+		}
+		
+		cInd := ""
+		if commonIndent != nil {
+			cInd = *commonIndent
+		}
+		
+		var adjustedNewLines []string
+		for _, l := range newLines {
+			if strings.TrimSpace(l) == "" {
+				adjustedNewLines = append(adjustedNewLines, l)
+			} else {
+				stripped := l
+				if strings.HasPrefix(l, cInd) {
+					stripped = l[len(cInd):]
+				}
+				adjustedNewLines = append(adjustedNewLines, baseIndent + stripped)
+			}
+		}
+		
+		prefix := strings.Join(contentLines[:startIdx], "")
+		suffix := strings.Join(contentLines[endIdx+1:], "")
+		
+		newContent := prefix + strings.Join(adjustedNewLines, "") + suffix
+		return newContent, 1
+	}
+	
+	return content, len(matches)
+}
+
+func getIndentation(s string) string {
+	for i, c := range s {
+		if c != ' ' && c != '\t' {
+			return s[:i]
+		}
+	}
+	return strings.TrimRight(s, "\n\r")
 }
