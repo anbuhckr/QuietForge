@@ -360,6 +360,7 @@ class ConversationState {
     const source = displayLog || [];
     const oldTurns = [...this.turns];
     this.turns = [];
+    const clearedTurns = new Set();
     if (clearDom) {
       document.getElementById('chat').innerHTML = '';
     }
@@ -369,14 +370,12 @@ class ConversationState {
       const parts = msg.parts || [];
 
       if (role === 'user') {
-        // A new user message implies the previous turn's tool loop is finished.
         if (this.turns.length > 0) {
           this.turns[this.turns.length - 1].completed = true;
         }
 
         const isToolResult = parts.some(p => p.type === 'tool_result' || (p.type === 'text' && p.content && p.content.match(/^\[.*? Result\]\n/)));
         if (isToolResult) {
-          // Do nothing, this is just a tool result in the middle of a turn's tool loop
         } else {
           let existingTurn = oldTurns[this.turns.length];
           let isSame = existingTurn && existingTurn.messageId === msg.id;
@@ -403,79 +402,51 @@ class ConversationState {
         const isSame = (oldTurn.messageId === msg.id) || (!oldTurn.messageId && oldTurn.completed);
         
         if (isSame) {
-          // Restore the perfect Live SSE state that was accidentally wiped by _currentTurn()
           turn.liveContainer = oldTurn.liveContainer;
           turn.agent = oldTurn.agent;
-          turn.messageId = msg.id; // Save the real ID from the DB so future checks pass
+          turn.messageId = msg.id;
+          turn.id = oldTurn.id;
+          turn._skipDbParse = true;
+        } else if (oldTurn && oldTurn.id) {
+          turn.id = oldTurn.id;
+          turn.messageId = msg.id;
+          turn._needsFullRender = true;
+        } else {
+          turn.messageId = msg.id;
         }
         
-        // ONLY parse the DB if it's a completely different turn (e.g. historical). 
-        // We never want to parse the active turn from the DB because the DB groups tools differently than Live SSE, causing duplicates.
-        if (!isSame) {
-          turn.liveContainer = []; // Start fresh so we don't mutate references
-          turn.agent = '';
-          if (parts.length === 1 && parts[0].type === 'text') {
-            let content = parts[0].content;
-            let hasCompatTools = content.includes('Tool Call]');
+        if (turn._skipDbParse) {
+          return;
+        }
 
-            if (hasCompatTools) {
-              const regex = /([\s\S]*?)\[(?:Compat )?Tool Call\]\nTool: (.*)\nTool Input: ([\s\S]*?)\n\[\/Tool Call\]/g;
-              let lastIndex = 0;
-              let match;
-              turn.agent = '';
-              while ((match = regex.exec(content)) !== null) {
-                let think = match[1].trim();
-                const toolName = match[2];
-                const toolInput = match[3];
-                let toolStr = `${toolName} ${toolInput}`;
-                try { toolStr = this.formatToolCall(toolStr); } catch (e) { }
-                if (think && /\[Thought process omitted/i.test(think)) {
-                  think = null;
-                }
-                turn.liveContainer.push({ think: think || null, tools: [toolStr] });
-                lastIndex = regex.lastIndex;
-              }
-              const remainder = content.substring(lastIndex).trim();
-              if (remainder) turn.agent = remainder;
-            } else {
-              const entries = this._parseThinkBlocks(content, "");
-              for (const e of entries) {
+        if (!clearedTurns.has(this.turns.length - 1)) {
+          turn.liveContainer = [];
+          turn.agent = '';
+          clearedTurns.add(this.turns.length - 1);
+        }
+        
+        if (msg.parts && Array.isArray(msg.parts)) {
+          const parts = msg.parts;
+          parts.forEach(p => {
+            if (p.type === 'text') {
+              const parsed = this._parseThinkBlocks(p.content, "");
+              for (const e of parsed) {
                 if (e.think) {
                   turn.liveContainer.push({ think: e.think, tools: [] });
-                  if (turn._pendingTools.length > 0) {
-                    turn.liveContainer[turn.liveContainer.length - 1].tools.unshift(...turn._pendingTools);
-                    turn._pendingTools = [];
-                  }
-                }
-                if (e.content) {
+                } else if (e.content) {
                   turn.agent = (turn.agent || '') + e.content;
                 }
               }
-            }
-            turn.completed = true;
-          } else {
-            parts.forEach(p => {
-              if (p.type === 'text') {
-                const parsed = this._parseThinkBlocks(p.content, "");
-                for (const e of parsed) {
-                  if (e.think) {
-                    turn.liveContainer.push({ think: e.think, tools: [] });
-                  } else if (e.content) {
-                    turn.agent = (turn.agent || '') + e.content;
-                  }
-                }
-              } else if (p.type === 'tool_use') {
-                let toolStr = `${p.tool_name} ${p.arguments}`;
-                try { toolStr = this.formatToolCall(toolStr); } catch (e) { }
-                
-                if (turn.liveContainer.length > 0) {
-                  turn.liveContainer[turn.liveContainer.length - 1].tools.push(toolStr);
-                } else {
-                  turn._pendingTools.push(toolStr);
-                }
+            } else if (p.type === 'tool_use') {
+              let toolStr = `${p.tool_name} ${p.arguments}`;
+              try { toolStr = this.formatToolCall(toolStr); } catch (e) { }
+              
+              if (turn.liveContainer.length === 0) {
+                turn.liveContainer.push({ think: null, tools: [] });
               }
-            });
-          }
+              turn.liveContainer[turn.liveContainer.length - 1].tools.push(toolStr);
+            }
+          });
         }
 
         const partsSummary = parts.map(p => p.type === 'tool_use' ? p.tool_name : 'text:' + (p.content || '').substring(0, 30));
@@ -495,17 +466,7 @@ class ConversationState {
         }
       }
     });
-    // Flush any remaining pending tools
-    for (const turn of this.turns) {
-      if (turn._pendingTools && turn._pendingTools.length > 0) {
-        if (turn.liveContainer.length > 0) {
-          turn.liveContainer[turn.liveContainer.length - 1].tools.push(...turn._pendingTools);
-        } else {
-          turn.liveContainer.push({ think: null, tools: [...turn._pendingTools] });
-        }
-        turn._pendingTools = [];
-      }
-    }
+    // No pending tools flush needed since they are pushed directly to liveContainer
     await this.render();
   }
 
@@ -795,6 +756,16 @@ class ConversationState {
 
       const details = wrapper.querySelector('details.inline-live');
       const log = details.querySelector('.compact-log');
+      
+      if (turn._needsFullRender) {
+        log.innerHTML = '';
+        log.dataset.count = "0";
+        for (const key in log.dataset) {
+          if (key.startsWith('t_')) delete log.dataset[key];
+        }
+        delete turn._needsFullRender;
+      }
+      
       const renderedCount = parseInt(log.dataset.count || "0", 10);
       const isScrolledToBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 10;
 

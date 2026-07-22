@@ -738,7 +738,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.3")
+		fmt.Println("QuietForge v1.1.4")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -4495,8 +4495,8 @@ func ensureProjectInit() {
   "compaction": {
     "auto": true,
     "preserve_recent_tokens": 4000,
-    "prune": true,
-    "reserved": 2000,
+    "prune": false,
+    "reserved": 4000,
     "tail_turns": 5,
     "tool_truncation_limit": 1000
   },
@@ -4512,6 +4512,8 @@ func ensureProjectInit() {
           "@playwright/mcp@latest",
           "--isolated"
         ],
+		"disabled": false,
+        "environment": {},
         "type": "local"
       }
     }
@@ -4520,8 +4522,8 @@ func ensureProjectInit() {
     "primary": {
       "model": "gpt-4o",
       "disable_vision": true,
-      "context_window": 128000,
-      "max_messages": 200,
+      "context_window": 53000,
+      "max_messages": 50,
       "base_url": "https://api.openai.com/v1"
     }
   },
