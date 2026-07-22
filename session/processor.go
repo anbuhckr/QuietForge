@@ -42,7 +42,7 @@ func (sp *SessionProcessor) ProcessToolCall(tc provider.ToolCall, session *Sessi
 	allowed := false
 	if agentDef != nil {
 		for _, t := range toolDefs {
-			if t.ID() == tc.Name && agent.IsToolAllowed(tc.Name, agentDef.Tools) {
+			if t.ID() == tc.Name && agent.IsToolAllowed(agentID, tc.Name) {
 				allowed = true
 				break
 			}

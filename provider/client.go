@@ -55,6 +55,7 @@ type Client struct {
 	Model                string // global default model
 	knownMaxTokens       int
 	SuccessfulProviderID string
+	OnEvent              func(msg string)
 	mu                   sync.RWMutex
 }
 
@@ -131,8 +132,12 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 				if retries >= 2 {
 					break
 				}
+				msg := fmt.Sprintf("%s hard error: %v, retrying (Attempt %d/3) before fallback", label, err, retries+1)
 				if Debug {
-					log.Printf("[DEBUG] %s hard error: %v, retrying (Attempt %d/3) before fallback", label, err, retries+1)
+					log.Printf("[DEBUG] %s", msg)
+				}
+				if c.OnEvent != nil {
+					c.OnEvent(msg)
 				}
 				select {
 				case <-ctx.Done():
@@ -161,8 +166,12 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 			if retries >= 2 {
 				break
 			}
+			msg := fmt.Sprintf("%s transient error: %v, retrying in 3 seconds (Attempt %d)", label, err, retries+1)
 			if Debug {
-				log.Printf("[DEBUG] %s transient error: %v, retrying in 3 seconds (Attempt %d)", label, err, retries+1)
+				log.Printf("[DEBUG] %s", msg)
+			}
+			if c.OnEvent != nil {
+				c.OnEvent(msg)
 			}
 			select {
 			case <-ctx.Done():
@@ -171,8 +180,12 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 			}
 		}
 
+		msg := fmt.Sprintf("%s provider attempt failed, falling back to next provider. Error: %v", label, err)
 		if Debug {
-			log.Printf("[DEBUG] %s provider attempt failed, falling back. Error: %v", label, err)
+			log.Printf("[DEBUG] %s", msg)
+		}
+		if c.OnEvent != nil {
+			c.OnEvent(msg)
 		}
 	}
 

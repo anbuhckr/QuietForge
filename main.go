@@ -276,7 +276,6 @@ func askPermissionCallback(toolName, toolInput, agentID string) (bool, error) {
 }
 
 func buildToolSchemas(agentID string) []map[string]any {
-	allowed := agent.GetAgentTools(agentID)
 	var schemas []map[string]any
 
 	cfg := config.LoadConfig(workspaceDir)
@@ -286,7 +285,7 @@ func buildToolSchemas(agentID string) []map[string]any {
 		if t.ID() == "semantic_search" && !embeddingEnabled {
 			continue
 		}
-		if agent.IsToolAllowed(t.ID(), allowed) {
+		if agent.IsToolAllowed(agentID, t.ID()) {
 			schemas = append(schemas, map[string]any{
 				"type": "function",
 				"function": map[string]any{
@@ -301,7 +300,6 @@ func buildToolSchemas(agentID string) []map[string]any {
 }
 
 func buildOpenAIToolDefs(agentID string) []openai.Tool {
-	allowed := agent.GetAgentTools(agentID)
 	var tools []openai.Tool
 
 	cfg := config.LoadConfig(workspaceDir)
@@ -311,7 +309,7 @@ func buildOpenAIToolDefs(agentID string) []openai.Tool {
 		if t.ID() == "semantic_search" && !embeddingEnabled {
 			continue
 		}
-		if agent.IsToolAllowed(t.ID(), allowed) {
+		if agent.IsToolAllowed(agentID, t.ID()) {
 			tools = append(tools, openai.Tool{
 				Type: "function",
 				Function: &openai.FunctionDefinition{
@@ -474,15 +472,58 @@ func listProjectConversations(workspace string) ([]map[string]any, error) {
 					if err == nil {
 						for _, p := range parts {
 							if p.Type == "text" && p.Content != "" {
-								text := p.Content
+								text := strings.TrimSpace(p.Content)
+								
+								// Mirror frontend logic: Strip prepended context block if present
+								if strings.HasPrefix(text, "{") && strings.Contains(text, `"context":`) {
+									parts := strings.Split(text, "\n\n")
+									for i := range parts {
+										possibleJson := strings.Join(parts[:i+1], "\n\n")
+										var jData map[string]any
+										if err := json.Unmarshal([]byte(possibleJson), &jData); err == nil {
+											if _, ok := jData["context"]; ok {
+												// Found the context block, remove it
+												text = strings.TrimSpace(strings.Join(parts[i+1:], "\n\n"))
+												break
+											}
+										}
+									}
+								}
+
+								// Parse legacy generic JSON envelope just in case (like from IDE)
+								if strings.HasPrefix(text, "{") {
+									var jData map[string]any
+									if err := json.Unmarshal([]byte(text), &jData); err == nil {
+										if msgRaw, ok := jData["message"].(string); ok {
+											text = msgRaw
+										} else if reqRaw, ok := jData["request"].(string); ok {
+											text = reqRaw
+										}
+									}
+								}
 								if idx := strings.Index(text, "User Request:"); idx >= 0 {
 									text = strings.TrimSpace(text[idx+len("User Request:"):])
 								}
-								lines := strings.SplitN(text, "\n", 2)
-								if len(lines[0]) > 58 {
-									title = lines[0][:58]
-								} else {
-									title = lines[0]
+								// Remove any remaining XML-like tags like <USER_REQUEST> just in case
+								text = regexp.MustCompile(`(?i)<[^>]+>`).ReplaceAllString(text, "")
+								text = strings.TrimSpace(text)
+								lines := strings.Split(text, "\n")
+								for _, line := range lines {
+									cleanLine := strings.TrimSpace(line)
+									// Skip lines that are just brackets or empty
+									if cleanLine == "" || cleanLine == "{" || cleanLine == "[" || cleanLine == "}" || cleanLine == "]" {
+										continue
+									}
+									if len(cleanLine) > 58 {
+										title = cleanLine[:58]
+									} else {
+										title = cleanLine
+									}
+									break
+								}
+								if title == "" || title == "New conversation" {
+									// Fallback if all lines were just brackets or empty
+									title = "New conversation"
 								}
 								break
 							}
@@ -738,7 +779,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.4")
+		fmt.Println("QuietForge v1.1.5")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1346,6 +1387,15 @@ func configToDict(cfg config.Config) map[string]any {
 		comp["preserve_recent_tokens"] = float64(cfg.Compaction.PreserveRecentTokens)
 		comp["reserved"] = float64(cfg.Compaction.Reserved)
 		comp["tool_truncation_limit"] = float64(cfg.Compaction.ToolTruncationLimit)
+		if cfg.Compaction.Model != nil {
+			comp["model"] = *cfg.Compaction.Model
+		}
+		if cfg.Compaction.APIKey != nil {
+			comp["api_key"] = *cfg.Compaction.APIKey
+		}
+		if cfg.Compaction.BaseURL != nil {
+			comp["base_url"] = *cfg.Compaction.BaseURL
+		}
 		d["compaction"] = comp
 	}
 	return d
@@ -1550,44 +1600,78 @@ func setupChatRoutes(api fiber.Router) {
 			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh the page."})
 		}
 		debugLog("/chat/revert: messageID=%s", payload.MessageID)
-		msgs := activeSession.GetHistory()
+		displayLog, _ := activeSession.Repo.GetDisplayLog(activeSession.SessionID)
 		var targetMsg *session.Message
-		for _, m := range msgs {
-			if m.ID == payload.MessageID {
-				targetMsg = &m
+		targetIdx := -1
+		for i, entry := range displayLog {
+			if id, ok := entry["id"].(string); ok && id == payload.MessageID {
+				targetIdx = i
 				break
 			}
 		}
-		if targetMsg == nil {
+
+		if targetIdx > 0 {
+			if role, _ := displayLog[targetIdx]["role"].(string); role == "assistant" {
+				if prevRole, _ := displayLog[targetIdx-1]["role"].(string); prevRole == "user" {
+					targetIdx--
+				}
+			}
+		}
+
+		if targetIdx == -1 {
 			return c.Status(404).JSON(fiber.Map{"error": "Message not found"})
 		}
-		snapRaw, ok := targetMsg.Metadata["snapshot"]
-		if !ok {
-			return c.Status(404).JSON(fiber.Map{"error": "No snapshot for this message"})
+
+		entry := displayLog[targetIdx]
+		targetMsg = &session.Message{ID: entry["id"].(string)}
+		if role, ok := entry["role"].(string); ok {
+			targetMsg.Role = role
 		}
-		snapHash, ok := snapRaw.(string)
-		if !ok || snapHash == "" {
-			return c.Status(404).JSON(fiber.Map{"error": "No snapshot for this message"})
+		if ca, ok := entry["created_at"].(int64); ok {
+			targetMsg.CreatedAt = ca
 		}
+		if meta, ok := entry["metadata"].(map[string]any); ok {
+			targetMsg.Metadata = meta
+		}
+
+		var snapHash string
+		for i := targetIdx; i >= 0; i-- {
+			if meta, ok := displayLog[i]["metadata"].(map[string]any); ok {
+				if snapRaw, ok := meta["snapshot"]; ok {
+					if hash, ok := snapRaw.(string); ok && hash != "" {
+						snapHash = hash
+						break
+					}
+				}
+			}
+		}
+
 		ws := activeSession.Workspace
 		if ws == "" {
 			ws = workspaceDir
 		}
-		sm := util.NewSnapshotManager(ws)
-		if !sm.Restore(snapHash) {
-			return c.Status(500).JSON(fiber.Map{"error": "Failed to restore workspace"})
+		
+		if snapHash != "" {
+			sm := util.NewSnapshotManager(ws)
+			if !sm.Restore(snapHash) {
+				return c.Status(500).JSON(fiber.Map{"error": "Failed to restore workspace"})
+			}
 		}
 		// Delete files created by messages after the snapshot
-		for _, m := range msgs {
-			if m.CreatedAt >= targetMsg.CreatedAt && m.Role == "assistant" {
-				if runMetaRaw, ok := m.Metadata["run_meta"]; ok {
-					if runMeta, ok := runMetaRaw.(map[string]any); ok {
-						if changesRaw, ok := runMeta["workspace_changes"]; ok {
-							if changes, ok := changesRaw.(map[string]any); ok {
-								if createdRaw, ok := changes["created"]; ok {
-									if created, ok := createdRaw.([]any); ok {
-										for _, f := range created {
-											os.Remove(filepath.Join(ws, fmt.Sprintf("%v", f)))
+		for _, entry := range displayLog {
+			ca, ok := entry["created_at"].(int64)
+			role, _ := entry["role"].(string)
+			if ok && ca >= targetMsg.CreatedAt && role == "assistant" {
+				if meta, ok := entry["metadata"].(map[string]any); ok {
+					if runMetaRaw, ok := meta["run_meta"]; ok {
+						if runMeta, ok := runMetaRaw.(map[string]any); ok {
+							if changesRaw, ok := runMeta["workspace_changes"]; ok {
+								if changes, ok := changesRaw.(map[string]any); ok {
+									if createdRaw, ok := changes["created"]; ok {
+										if created, ok := createdRaw.([]any); ok {
+											for _, f := range created {
+												os.Remove(filepath.Join(ws, fmt.Sprintf("%v", f)))
+											}
 										}
 									}
 								}
@@ -1597,12 +1681,14 @@ func setupChatRoutes(api fiber.Router) {
 				}
 			}
 			// Clean up Git tags for reverted snapshots to prevent stale refs
-			if m.CreatedAt > targetMsg.CreatedAt {
-				if snapRaw, ok := m.Metadata["snapshot"]; ok {
-					if snapHash, ok := snapRaw.(string); ok && snapHash != "" {
-						tagDel := exec.Command("git", "tag", "-d", "quietforge-"+snapHash)
-						tagDel.Dir = ws
-						tagDel.Run()
+			if ok && ca > targetMsg.CreatedAt {
+				if meta, ok := entry["metadata"].(map[string]any); ok {
+					if snapRaw, ok := meta["snapshot"]; ok {
+						if snapHash, ok := snapRaw.(string); ok && snapHash != "" {
+							tagDel := exec.Command("git", "tag", "-d", "quietforge-"+snapHash)
+							tagDel.Dir = ws
+							tagDel.Run()
+						}
 					}
 				}
 			}
@@ -1629,11 +1715,20 @@ func setupChatRoutes(api fiber.Router) {
 		if payload.ConversationID != "" && payload.ConversationID != activeSession.SessionID {
 			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh the page."})
 		}
-		msgs := activeSession.GetHistory()
 		var targetMsg *session.Message
-		for _, m := range msgs {
-			if m.ID == payload.MessageID {
-				targetMsg = &m
+		displayLog, _ := activeSession.Repo.GetDisplayLog(activeSession.SessionID)
+		for _, entry := range displayLog {
+			if id, ok := entry["id"].(string); ok && id == payload.MessageID {
+				targetMsg = &session.Message{ID: id}
+				if role, ok := entry["role"].(string); ok {
+					targetMsg.Role = role
+				}
+				if ca, ok := entry["created_at"].(int64); ok {
+					targetMsg.CreatedAt = ca
+				}
+				if meta, ok := entry["metadata"].(map[string]any); ok {
+					targetMsg.Metadata = meta
+				}
 				break
 			}
 		}
@@ -2044,7 +2139,7 @@ func setupConfigRoutes(api fiber.Router) {
 			rawCfg = make(map[string]any)
 		}
 
-		rawCfg["compaction"] = map[string]any{
+		compMap := map[string]any{
 			"auto":                   payload.Auto,
 			"tail_turns":             payload.TailTurns,
 			"preserve_recent_tokens": payload.PreserveRecentTokens,
@@ -2052,6 +2147,16 @@ func setupConfigRoutes(api fiber.Router) {
 			"prune":                  payload.Prune,
 			"tool_truncation_limit":  payload.ToolTruncationLimit,
 		}
+		if payload.Model != nil {
+			compMap["model"] = *payload.Model
+		}
+		if payload.APIKey != nil {
+			compMap["api_key"] = *payload.APIKey
+		}
+		if payload.BaseURL != nil {
+			compMap["base_url"] = *payload.BaseURL
+		}
+		rawCfg["compaction"] = compMap
 
 		saveRawConfig(rawCfg)
 		appCfg = loadCfg()
@@ -2919,6 +3024,12 @@ func spawnSubagent(prompt, agentType, parentSessionID string) (string, <-chan st
 		for i := len(msgs) - 1; i >= 0; i-- {
 			if msgs[i].Role == "assistant" && len(msgs[i].Parts) > 0 {
 				report = msgs[i].Parts[0].Content
+				reThink := regexp.MustCompile(`(?is)<(?:think|thought)>.*?</(?:think|thought)>`)
+				report = reThink.ReplaceAllString(report, "")
+				report = strings.TrimSpace(report)
+				if report == "" {
+					report = "(Subagent returned no final report text. Please review the execution logs.)"
+				}
 				break
 			}
 		}
@@ -3034,6 +3145,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 
 		schemas := buildToolSchemas(agentID)
 		pm.SystemPrompt = pm.BuildSystemPrompt(agentID, schemas, workspace)
+		pm.SystemPrompt += "\n\n*** SUBAGENT DIRECTIVE ***\nYou are running as a background subagent (invoked by another agent). You MUST adhere to LITERAL EXECUTION: Do EXACTLY what the task prompt asks and nothing more. Do not overthink, perform extra exploration, or try to creatively fix bugs you find. If a step fails, DO NOT attempt to proceed to the next step; report the failure immediately and terminate. When finished, terminate your session by outputting your final report as plain text without calling any tools."
 
 		ctxWindow := 2000000
 
@@ -3058,13 +3170,16 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 			}
 		}
 
-		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {}, "")
+		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
+			addLiveEvent("activity", map[string]any{"event": "[Subagent] " + state})
+		}, "")
 		oaMsgs := session.ToOpenAIMessages(history, false)
 
 		toolDefs := buildOpenAIToolDefs(agentID)
 		streamCh, err := client.Stream(ctx, oaMsgs, toolDefs)
 		if err != nil {
 			debugLog("runSubEngine: cycle %d stream failed: %v", i, err)
+			addLiveEvent("activity", map[string]any{"event": fmt.Sprintf("⚠️ [Subagent Error] %v", err)})
 		}
 
 		var cycleContent string
@@ -3147,6 +3262,13 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 				wg.Add(1)
 				go func(idx int, call provider.ToolCall) {
 					defer wg.Done()
+					execText := fmt.Sprintf("Executing: [Subagent] %s", call.Name)
+					addLiveEvent("action", map[string]any{
+						"status": "started",
+						"name":   "[Subagent] " + call.Name,
+						"text":   execText,
+						"event":  execText,
+					})
 					res := sp.ProcessToolCall(call, subSession, agentID)
 					results[idx] = res
 				}(i, tc)
@@ -3234,6 +3356,14 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 					beforeSnap = util.TakeDirSnapshot(workspace)
 				}
 
+				execText := fmt.Sprintf("Executing: [Subagent] %s", tc.Name)
+				addLiveEvent("action", map[string]any{
+					"status": "started",
+					"name":   "[Subagent] " + tc.Name,
+					"text":   execText,
+					"event":  execText,
+				})
+
 				result := sp.ProcessToolCall(tc, subSession, agentID)
 
 				if workspace != "" {
@@ -3310,6 +3440,30 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		}
 		subSession.Save()
 	}
+}
+
+func triggerEngineWakeup() {
+	engineMu.Lock()
+	if engineRunning {
+		engineMu.Unlock()
+		return
+	}
+	engineRunning = true
+	engineStartTime = time.Now().UnixMilli()
+	stopRequested = false
+	engineMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	engineCancel = cancel
+
+	debugLog("triggerEngineWakeup: launching runEngine goroutine")
+
+	agentID := "build"
+	if activeSession != nil && activeSession.AgentID != "" {
+		agentID = activeSession.AgentID
+	}
+
+	go runEngine(ctx, "", agentID, "")
 }
 
 func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
@@ -3396,6 +3550,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 	sessionMu.Lock()
 	activeSession = session.NewSession(activeConversation, sessionRepo, agentID, configToDict(appCfg), workspace)
+	activeSession.WakeupCallback = triggerEngineWakeup
 	debugLog("runEngine: workspace=%s sessionID=%s", workspace, activeSession.SessionID)
 	if err := activeSession.Load(); err != nil {
 		debugLog("runEngine: new session (load err=%v)", err)
@@ -3489,6 +3644,11 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 	cfg := loadCfg()
 	client := clientFromCfg(cfg)
+	if client != nil {
+		client.OnEvent = func(msg string) {
+			addLiveEvent("activity", map[string]any{"event": "⚠️ " + msg})
+		}
+	}
 	pm := session.NewPromptManager(activeSession, configToDict(appCfg))
 
 	permRules := permission.FromConfig(cfg.Permission)
@@ -3522,6 +3682,9 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				Role:      "user",
 				CreatedAt: time.Now().UnixMilli(),
 				Parts:     []session.MessagePart{{Type: "text", Content: pendingMsg}},
+			}
+			if strings.HasPrefix(pendingMsg, "[Background Task") || strings.HasPrefix(pendingMsg, "[Notification]") {
+				followup.Metadata = map[string]any{"silent": true}
 			}
 			activeSession.AddMessage(followup)
 			activeSession.Save()
@@ -3923,6 +4086,13 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				wg.Add(1)
 				go func(idx int, call provider.ToolCall) {
 					defer wg.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							errStr := fmt.Sprintf("Tool execution panicked: %v", r)
+							debugLog("runEngine: " + errStr)
+							results[idx] = &tool.ToolResult{Error: "panic", Output: errStr}
+						}
+					}()
 					debugLog("runEngine: concurrently executing tool %s args=%.60s", call.Name, call.Arguments)
 
 					argsStr := formatToolSummary(call.Name, call.Arguments)

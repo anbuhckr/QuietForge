@@ -173,6 +173,18 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
 		return messages
 	}
 
+	if model, ok := config["model"].(string); ok && model != "" {
+		apiKey := ""
+		if ak, ok := config["api_key"].(string); ok {
+			apiKey = ak
+		}
+		baseURL := ""
+		if bu, ok := config["base_url"].(string); ok {
+			baseURL = bu
+		}
+		client = provider.NewClient(apiKey, baseURL, model)
+	}
+
 	tailStart := findTailStart(messages, GetTailTurns(config))
 
 	if tailStart <= 0 {
@@ -617,7 +629,11 @@ func PruneMessages(messages []Message, config map[string]any, targetTokens int) 
 		result = append([]Message(nil), messages[start:]...)
 	}
 
-	return compressMessages(result, targetTokens)
+	if EstimateTokens(result) > targetTokens {
+		result = compressMessages(result, targetTokens)
+	}
+
+	return result
 }
 
 func EstimateTokens(messages []Message) int {

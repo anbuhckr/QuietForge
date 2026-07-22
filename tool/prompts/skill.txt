@@ -1,5 +1,5 @@
 Load a specialized skill that provides domain-specific instructions and workflows.
-- Skills are loaded from .quietforge/skills/ or global config
+- Skills are loaded from .agents/skills/, .quietforge/skills/, or global config
 - Provide the skill name and optional task prompt
 - The skill instructions will be injected into the context
 - Use when a task requires specialized knowledge (testing, deployment, etc.)

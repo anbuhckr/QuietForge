@@ -53,12 +53,15 @@ type EmbeddingConfig struct {
 
 // CompactionConfig handles conversation history management.
 type CompactionConfig struct {
-	Auto                 bool `json:"auto"`
-	TailTurns            int  `json:"tail_turns"`
-	PreserveRecentTokens int  `json:"preserve_recent_tokens"`
-	Reserved             int  `json:"reserved"`
-	Prune                bool `json:"prune"`
-	ToolTruncationLimit  int  `json:"tool_truncation_limit"`
+	Auto                 bool    `json:"auto"`
+	TailTurns            int     `json:"tail_turns"`
+	PreserveRecentTokens int     `json:"preserve_recent_tokens"`
+	Reserved             int     `json:"reserved"`
+	Prune                bool    `json:"prune"`
+	ToolTruncationLimit  int     `json:"tool_truncation_limit"`
+	Model                *string `json:"model,omitempty"`
+	APIKey               *string `json:"api_key,omitempty"`
+	BaseURL              *string `json:"base_url,omitempty"`
 }
 
 // McpServerConfig and McpConfig define Model Context Protocol servers.

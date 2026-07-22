@@ -33,6 +33,7 @@ type Session struct {
 	eventHandlers    []EventHandler
 	loaded           bool
 	PendingMessage   string
+	WakeupCallback   func()
 }
 
 func NewSession(sessionID string, repo *storage.Repository, agentID string, config map[string]any, workspace string) *Session {
@@ -149,8 +150,17 @@ func (s *Session) Save() error {
 }
 func (s *Session) QueueFollowup(text string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.PendingMessage = text
+	if s.PendingMessage != "" {
+		s.PendingMessage += "\n\n" + text
+	} else {
+		s.PendingMessage = text
+	}
+	cb := s.WakeupCallback
+	s.mu.Unlock()
+	
+	if cb != nil {
+		cb()
+	}
 }
 
 func (s *Session) PopFollowup() string {
@@ -285,11 +295,17 @@ func (s *Session) AddMessage(message Message) error {
 
 		partsJSON, _ := json.Marshal(message.Parts)
 		metaJSON := []byte("{}")
+		isSilent := false
 		if message.Metadata != nil {
 			metaJSON, _ = json.Marshal(message.Metadata)
+			if s, ok := message.Metadata["silent"].(bool); ok {
+				isSilent = s
+			}
 		}
-		if err := s.Repo.AppendDisplayMessage(s.SessionID, message.ID, message.Role, string(partsJSON), string(metaJSON), message.CreatedAt); err != nil {
-			log.Printf("AddMessage: failed to append display_log for %s: %v", message.ID, err)
+		if !isSilent {
+			if err := s.Repo.AppendDisplayMessage(s.SessionID, message.ID, message.Role, string(partsJSON), string(metaJSON), message.CreatedAt); err != nil {
+				log.Printf("AddMessage: failed to append display_log for %s: %v", message.ID, err)
+			}
 		}
 	}
 	return nil

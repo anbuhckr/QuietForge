@@ -38,7 +38,7 @@ var BuiltinAgents = map[string]*AgentDefinition{
 		ID:                   AgentBuild,
 		Name:                 "Build",
 		SystemPromptTemplate: "default_system",
-		Tools: []string{"read", "write", "edit", "apply_patch", "grep", "glob", "shell", "webfetch", "websearch", "invoke_subagent", "question", "todowrite", "skill", "lsp", "ast_search", "revert_workspace", "mcp", "plan_exit", "write_artifact", "invalid"},
+		Tools: []string{"read", "write", "edit", "apply_patch", "grep", "glob", "shell", "webfetch", "websearch", "invoke_subagent", "question", "todowrite", "skill", "lsp", "ast_search", "revert_workspace", "plan_exit", "write_artifact", "invalid"},
 		PermissionProfiles: map[string]string{
 			"read":        "allowed",
 			"write":       "allowed",
@@ -55,7 +55,6 @@ var BuiltinAgents = map[string]*AgentDefinition{
 			"skill":       "allowed",
 			"lsp":         "allowed",
 			"ast_search":  "allowed",
-			"mcp":         "allowed",
 			"plan_exit":   "allowed",
 			"write_artifact": "allowed",
 			"invalid":     "allowed",
@@ -79,7 +78,7 @@ var BuiltinAgents = map[string]*AgentDefinition{
 			"skill":       "allowed",
 			"lsp":         "allowed",
 			"ast_search":  "allowed",
-			"mcp":            "allowed",
+			"mcp":         "allowed",
 			"write_artifact": "allowed",
 			"invalid":        "allowed",
 		},
@@ -207,9 +206,13 @@ func GetAgentTools(id string) []string {
 	return []string{}
 }
 
-func IsToolAllowed(toolID string, tools []string) bool {
+func IsToolAllowed(agentID string, toolID string) bool {
+	agentDef := GetAgent(agentID)
+	if agentDef == nil {
+		return false
+	}
 	hasMCP := false
-	for _, p := range tools {
+	for _, p := range agentDef.Tools {
 		if p == "mcp" {
 			hasMCP = true
 		}
@@ -225,6 +228,10 @@ func IsToolAllowed(toolID string, tools []string) bool {
 	// Auto-allow any dynamically registered MCP tool (name__tool format)
 	// when the agent has "mcp" in its tool list
 	if hasMCP && strings.Contains(toolID, "__") {
+		// Enforce strict sandbox: Only the Browser agent can use Playwright MCP tools.
+		if agentID != AgentBrowser && strings.HasPrefix(toolID, "playwright__") {
+			return false
+		}
 		return true
 	}
 	return false

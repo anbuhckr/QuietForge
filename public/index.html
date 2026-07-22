@@ -427,6 +427,18 @@
           <input type="number" id="cfgCompactionTruncation" class="config-input" min="1000" step="1000">
         </div>
         <div class="config-group">
+          <label class="config-label">Custom Model (Optional)</label>
+          <input type="text" id="cfgCompactionModel" class="config-input" placeholder="e.g. qwen-compactor">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Custom Base URL (Optional)</label>
+          <input type="text" id="cfgCompactionBaseURL" class="config-input" placeholder="e.g. http://localhost:11434/v1">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Custom API Key (Optional)</label>
+          <input type="password" id="cfgCompactionAPIKey" class="config-input" placeholder="Leave empty if local">
+        </div>
+        <div class="config-group">
           <label class="config-label" style="display:flex; align-items:center; gap:8px;">
             <input type="checkbox" id="cfgCompactionAuto"> Enable Auto-Compaction
           </label>

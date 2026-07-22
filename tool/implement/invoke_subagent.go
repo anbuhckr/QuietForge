@@ -27,8 +27,8 @@ func (t *InvokeSubagentTool) Parameters() map[string]interface{} {
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"prompt": map[string]interface{}{"type": "string", "description": "Detailed task prompt for the sub-agent"},
-						"subagent_type": map[string]interface{}{"type": "string", "description": "Type of sub-agent to use (e.g., 'build', 'browser', 'plan'). Use 'browser' for automated UI testing and visual debugging tasks."},
+						"prompt": map[string]interface{}{"type": "string", "description": "Highly explicit, concrete task instructions. Tell the subagent EXACTLY what to do step-by-step. Instruct it to exit immediately on failure. DO NOT give open-ended exploration goals."},
+						"subagent_type": map[string]interface{}{"type": "string", "description": "The type of sub-agent to invoke. Built-ins: 'explore', 'build', 'browser' (Use 'browser' for all Playwright/UI web tasks)."},
 					},
 					"required": []string{"prompt", "subagent_type"},
 				},

@@ -75,16 +75,39 @@ func BuildSystemPrompt(agentID string, tools []map[string]any, env map[string]st
 	}
 
 	if workspace != "" {
-		agentsMD := filepath.Join(workspace, "AGENTS.md")
+		agentsMD := filepath.Join(workspace, ".agents", "AGENTS.md")
+		if stat, err := os.Stat(agentsMD); err != nil || stat.IsDir() {
+			agentsMD = filepath.Join(workspace, "AGENTS.md")
+		}
 
 		if stat, err := os.Stat(agentsMD); err == nil && !stat.IsDir() {
 			if data, err := os.ReadFile(agentsMD); err == nil {
+				relPath, relErr := filepath.Rel(workspace, agentsMD)
+				if relErr != nil {
+					relPath = "AGENTS.md"
+				}
+				relPath = filepath.ToSlash(relPath)
 				sections = append(
 					sections,
-					"# Workspace Rules (AGENTS.md)\n"+string(data),
+					fmt.Sprintf("# Workspace Rules (%s)\n%s", relPath, string(data)),
 				)
 			}
 		}
+	}
+
+	hasShell := false
+	for _, t := range tools {
+		if fn, ok := t["function"].(map[string]any); ok {
+			if name, ok := fn["name"].(string); ok && name == "shell" {
+				hasShell = true
+				break
+			}
+		}
+	}
+
+	if hasShell {
+		shellRule := "You are running in a non-interactive headless shell. YOU MUST NEVER run commands that wait for user confirmation (e.g., waiting for [Y/n]). Always append `-y`, `--quiet`, or `CI=true` to your commands. If your command hangs, it is likely waiting for input you cannot provide."
+		sections = append(sections, "# Interactive Shell Guidance\n"+shellRule)
 	}
 
 	return strings.Join(sections, "\n\n")

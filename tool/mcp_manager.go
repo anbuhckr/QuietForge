@@ -92,7 +92,7 @@ func (s *mcpSession) readLine() (string, error) {
 	return "", s.sc.Err()
 }
 
-const mcpCallTimeout = 5 * time.Minute
+const mcpCallTimeout = 60 * time.Second
 
 func (s *mcpSession) call(method string, params any) (json.RawMessage, error) {
 	s.mu.Lock()

@@ -69,6 +69,7 @@ func (t *SkillTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResul
 		candidates := []string{
 			filepath.Join(base, skillName+".md"),
 			filepath.Join(base, skillName+".txt"),
+			filepath.Join(base, skillName, "SKILL.md"),
 			filepath.Join(base, skillName, "README.md"),
 		}
 		for _, p := range candidates {

@@ -399,7 +399,7 @@ class ConversationState {
         }
         const oldTurn = oldTurns[this.turns.length - 1] || {};
         
-        const isSame = (oldTurn.messageId === msg.id) || (!oldTurn.messageId && oldTurn.completed);
+        const isSame = !oldTurn.completed && (oldTurn.messageId === msg.id);
         
         if (isSame) {
           turn.liveContainer = oldTurn.liveContainer;
@@ -2071,6 +2071,9 @@ async function openCompactionSettings() {
       $('cfgCompactionReserved').value = c.reserved || 2000;
       $('cfgCompactionTruncation').value = c.tool_truncation_limit || 10000;
       $('cfgCompactionPrune').checked = c.prune || false;
+      $('cfgCompactionModel').value = c.model || '';
+      $('cfgCompactionBaseURL').value = c.base_url || '';
+      $('cfgCompactionAPIKey').value = c.api_key || '';
     }
   } catch (e) {
     console.error('Failed to load compaction config', e);
@@ -2089,6 +2092,9 @@ $('compactionSave').onclick = async () => {
     reserved: parseInt($('cfgCompactionReserved').value) || 2000,
     tool_truncation_limit: parseInt($('cfgCompactionTruncation').value) || 10000,
     prune: $('cfgCompactionPrune').checked,
+    model: $('cfgCompactionModel').value.trim() || undefined,
+    base_url: $('cfgCompactionBaseURL').value.trim() || undefined,
+    api_key: $('cfgCompactionAPIKey').value.trim() || undefined,
   };
 
   try {

@@ -3,11 +3,9 @@ package implement
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -313,23 +311,8 @@ func appendToActiveSession(msgContent string, ctx *tool.ToolContext) {
 	if !ok || s == nil {
 		return
 	}
-	sessionID := s.SessionID
-
-	b := make([]byte, 4)
-	rand.Read(b)
-	msg := session.Message{
-		ID:        fmt.Sprintf("msg-%d-%x", time.Now().UnixNano(), b),
-		SessionID: sessionID,
-		Role:      "system",
-		Parts: []session.MessagePart{
-			{Type: "text", Content: msgContent},
-		},
-		CreatedAt: time.Now().UnixMilli(),
-	}
-	if err := s.AddMessage(msg); err != nil {
-		log.Printf("appendToActiveSession: AddMessage failed: %v", err)
-	}
-	s.QueueFollowup("background_task_completed")
+	
+	s.QueueFollowup(msgContent)
 }
 
 const maxCommandLength = 50000
