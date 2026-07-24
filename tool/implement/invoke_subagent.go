@@ -7,7 +7,7 @@ import (
 )
 
 type InvokeSubagentTool struct {
-	SpawnFunc func(prompt, agentType, parentSessionID string) (sessionID string, reportChan <-chan string, err error)
+	SpawnFunc func(prompt, agentType string) (sessionID string, reportChan <-chan string, err error)
 }
 
 func (t *InvokeSubagentTool) ID() string {
@@ -72,7 +72,7 @@ func (t *InvokeSubagentTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.
 			agentType = "build"
 		}
 
-		sessionID, ch, err := t.SpawnFunc(req.Prompt, agentType, ctx.SessionID)
+		sessionID, ch, err := t.SpawnFunc(req.Prompt, agentType)
 		if err != nil {
 			results = append(results, fmt.Sprintf("[%d] Failed to spawn subagent (type: %s): %v", i, agentType, err))
 		} else {

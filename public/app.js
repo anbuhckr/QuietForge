@@ -278,6 +278,8 @@ let runStartTime = 0, runTimerInterval = null;
 class ConversationState {
   constructor() {
     this.turns = [];
+    this._loadPromise = null;
+    this._renderPromise = null;
   }
 
   _currentTurn() {
@@ -357,13 +359,20 @@ class ConversationState {
   }
 
   async loadDb(displayLog, clearDom = true) {
-    const source = displayLog || [];
-    const oldTurns = [...this.turns];
-    this.turns = [];
-    const clearedTurns = new Set();
-    if (clearDom) {
-      document.getElementById('chat').innerHTML = '';
+    while (this._loadPromise) {
+      await this._loadPromise;
     }
+    let resolveLock;
+    this._loadPromise = new Promise(r => resolveLock = r);
+
+    try {
+      const source = displayLog || [];
+      const oldTurns = [...this.turns];
+      this.turns = [];
+      const clearedTurns = new Set();
+      if (clearDom) {
+        document.getElementById('chat').innerHTML = '';
+      }
 
     source.forEach(msg => {
       const role = String(msg.role || '').toLowerCase();
@@ -468,6 +477,11 @@ class ConversationState {
     });
     // No pending tools flush needed since they are pushed directly to liveContainer
     await this.render();
+    } finally {
+      const release = resolveLock;
+      this._loadPromise = null;
+      if (release) release();
+    }
   }
 
   async addLiveEvent(evt) {
@@ -531,8 +545,6 @@ class ConversationState {
       if (evt.duration_ms) turn.durationMs = evt.duration_ms;
       if (evt.workspace_changes) turn.workspaceChanges = evt.workspace_changes;
       // const lcSnapshot = turn.liveContainer.map(e => ({ think: e.think, tools: e.tools }));
-
-      return;
     }
 
     requestAnimationFrame(async () => {
@@ -577,14 +589,21 @@ class ConversationState {
   }
 
   async render() {
-    const shouldFollow = chatIsNearBottom();
-    const chat = document.getElementById('chat');
-
-    if (this.turns.length === 0) {
-      chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
-      if (shouldFollow) scrollChatToBottom();
-      return;
+    while (this._renderPromise) {
+      await this._renderPromise;
     }
+    let resolveLock;
+    this._renderPromise = new Promise(r => resolveLock = r);
+
+    try {
+      const shouldFollow = chatIsNearBottom();
+      const chat = document.getElementById('chat');
+
+      if (this.turns.length === 0) {
+        chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
+        if (shouldFollow) scrollChatToBottom();
+        return;
+      }
 
     if (chat.children.length === 1 && chat.children[0].classList.contains('system')) {
       chat.innerHTML = '';
@@ -620,6 +639,11 @@ class ConversationState {
 
     updateStickyPrompts();
     if (shouldFollow) scrollChatToBottom();
+    } finally {
+      const release = resolveLock;
+      this._renderPromise = null;
+      if (release) release();
+    }
   }
 
   async _renderTurn(turnGroup, turn) {
@@ -1419,7 +1443,7 @@ async function handleAgentEvent(d, isHistory = false) {
     return;
   }
   if (d.type === 'primary_changed') {
-    if (!isHistory) await refresh();
+    if (!isHistory && !running) await refresh();
     return;
   }
 

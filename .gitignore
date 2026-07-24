@@ -18,9 +18,6 @@ rsrc_windows_*
 server.crt
 server.key
 .quietforge/
-test-repo/
-original/
-scratch/
 runModel.bat
 mmproj-Qwythos*
 Qwythos*

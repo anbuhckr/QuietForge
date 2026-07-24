@@ -182,6 +182,15 @@ func parseConfig(data map[string]any) Config {
 		} else {
 			cc.ToolTruncationLimit = 2000
 		}
+		if modelStr, ok := compactionRaw["model"].(string); ok {
+			cc.Model = &modelStr
+		}
+		if apiKeyStr, ok := compactionRaw["api_key"].(string); ok {
+			cc.APIKey = &apiKeyStr
+		}
+		if baseURLStr, ok := compactionRaw["base_url"].(string); ok {
+			cc.BaseURL = &baseURLStr
+		}
 		cfg.Compaction = &cc
 	}
 
@@ -404,6 +413,15 @@ func configToDict(cfg Config) map[string]any {
 		comp["reserved"] = float64(cfg.Compaction.Reserved)
 		comp["prune"] = cfg.Compaction.Prune
 		comp["tool_truncation_limit"] = float64(cfg.Compaction.ToolTruncationLimit)
+		if cfg.Compaction.Model != nil {
+			comp["model"] = *cfg.Compaction.Model
+		}
+		if cfg.Compaction.APIKey != nil {
+			comp["api_key"] = *cfg.Compaction.APIKey
+		}
+		if cfg.Compaction.BaseURL != nil {
+			comp["base_url"] = *cfg.Compaction.BaseURL
+		}
 		d["compaction"] = comp
 	}
 	if cfg.Username != nil {

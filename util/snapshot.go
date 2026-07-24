@@ -39,13 +39,41 @@ func (m *SnapshotManager) Create(message string) *string {
 		return nil
 	}
 
-	stdout, _, code := m.runGit("stash", "create", "-m", message)
-	if code == 0 && strings.TrimSpace(stdout) != "" {
-		hash := strings.TrimSpace(stdout)
+	// Use a shadow index so we don't touch the user's staging area
+	shadowIndex := ".git/qf_index"
+	
+	// Create a temporary index with all files (including untracked)
+	cmdAdd := exec.Command("git", "add", "-A")
+	cmdAdd.Dir = m.Workspace
+	cmdAdd.Env = append(os.Environ(), "GIT_INDEX_FILE="+shadowIndex)
+	// Ignore errors since some files might be locked or have permission issues
+	cmdAdd.Run()
+
+	// Write the shadow index to a tree
+	cmdTree := exec.Command("git", "write-tree")
+	cmdTree.Dir = m.Workspace
+	cmdTree.Env = append(os.Environ(), "GIT_INDEX_FILE="+shadowIndex)
+	treeBytes, err := cmdTree.Output()
+	if err != nil {
+		return nil
+	}
+	treeHash := strings.TrimSpace(string(treeBytes))
+
+	// Create a commit from the tree
+	cmdCommit := exec.Command("git", "commit-tree", treeHash, "-p", "HEAD", "-m", message)
+	cmdCommit.Dir = m.Workspace
+	cmdCommit.Env = append(os.Environ(), "GIT_INDEX_FILE="+shadowIndex)
+	commitBytes, err := cmdCommit.Output()
+	
+	// Clean up the shadow index
+	os.Remove(filepath.Join(m.Workspace, shadowIndex))
+
+	if err == nil {
+		hash := strings.TrimSpace(string(commitBytes))
 		return &hash
 	}
 
-	stdout, _, code = m.runGit("rev-parse", "HEAD")
+	stdout, _, code := m.runGit("rev-parse", "HEAD")
 	if code == 0 {
 		hash := strings.TrimSpace(stdout)
 		return &hash
@@ -71,7 +99,7 @@ func (m *SnapshotManager) Restore(commitHash string) bool {
 	if code != 0 {
 		return false
 	}
-	_, _, code = m.runGit("checkout", commitHash, "--", ".")
+	_, _, code = m.runGit("restore", "--source="+commitHash, "--worktree", ".")
 	return code == 0
 }
 
@@ -81,12 +109,12 @@ func (m *SnapshotManager) RestoreFile(commitHash string, filePath string) bool {
 		return false
 	}
 
-	stdout, stderr, code := m.runGit("checkout", commitHash, "--", filePath)
+	stdout, stderr, code := m.runGit("restore", "--source="+commitHash, "--worktree", filePath)
 	if code == 0 {
 		return true
 	}
 
-	// If checkout failed because pathspec did not match, it means the file was created recently.
+	// If restore failed because pathspec did not match, it means the file was created recently.
 	// Reverting it means we should delete it.
 	lowerStderr := strings.ToLower(stderr)
 	lowerStdout := strings.ToLower(stdout)

@@ -97,7 +97,12 @@ type callFunc func(instance ProviderInstance, req openai.ChatCompletionRequest) 
 func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletionRequest, messages []openai.ChatCompletionMessage, label string, callFn callFunc) (interface{}, error) {
 	maxTokensLimit := 4096
 
-	for _, instance := range c.clients {
+	c.mu.RLock()
+	clients := make([]ProviderInstance, len(c.clients))
+	copy(clients, c.clients)
+	c.mu.RUnlock()
+
+	for i, instance := range clients {
 		req.Model = instance.Model
 		if req.Model == "" {
 			req.Model = c.Model
@@ -119,6 +124,16 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 					c.knownMaxTokens = req.MaxTokens
 				}
 				c.SuccessfulProviderID = instance.ID
+
+				// If a fallback was successful, promote it to the front so subsequent tool calls in this engine run use it immediately
+				if i > 0 {
+					newClients := make([]ProviderInstance, 0, len(c.clients))
+					newClients = append(newClients, c.clients[i])
+					newClients = append(newClients, c.clients[:i]...)
+					newClients = append(newClients, c.clients[i+1:]...)
+					c.clients = newClients
+				}
+				
 				c.mu.Unlock()
 				return result, nil
 			}
