@@ -41,7 +41,7 @@ func (r *Repository) UpsertSession(session SessionRow) error {
 }
 
 func (r *Repository) GetSession(sessionID string) (*SessionRow, error) {
-	row := r.DB.Conn.QueryRow(`SELECT id, agent_id, workspace, created_at, updated_at, metadata, prompt_tokens, completion_tokens FROM sessions WHERE id LIKE ?`, sessionID+"%")
+	row := r.DB.Conn.QueryRow(`SELECT id, agent_id, workspace, created_at, updated_at, metadata, prompt_tokens, completion_tokens FROM sessions WHERE id = ?`, sessionID)
 	var s SessionRow
 	var metaStr string
 	err := row.Scan(&s.ID, &s.AgentID, &s.Workspace, &s.CreatedAt, &s.UpdatedAt, &metaStr, &s.PromptTokens, &s.CompletionTokens)
@@ -293,7 +293,7 @@ func (r *Repository) ListTodos(sessionID string) ([]TodoRow, error) {
 }
 
 func (r *Repository) DeleteSession(sessionID string) (bool, error) {
-	row := r.DB.Conn.QueryRow("SELECT id FROM sessions WHERE id LIKE ?", sessionID+"%")
+	row := r.DB.Conn.QueryRow("SELECT id FROM sessions WHERE id = ?", sessionID)
 	var actualID string
 	if err := row.Scan(&actualID); err != nil {
 		return false, nil

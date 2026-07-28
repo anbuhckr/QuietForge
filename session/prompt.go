@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"quietforge/provider"
+	"quietforge/util"
 )
 
 var (
@@ -82,6 +83,28 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 		autoCompaction = enabled
 	}
 
+	if pm.Session != nil && pm.Session.Repo != nil {
+		if todos, err := pm.Session.Repo.ListTodos(pm.Session.SessionID); err == nil && len(todos) > 0 {
+			var allTodoLines []string
+			for _, t := range todos {
+				m := statusMarker(t.Status)
+				allTodoLines = append(allTodoLines, fmt.Sprintf("%s %s: %s", m, t.ID, t.Content))
+			}
+			if len(allTodoLines) > 0 {
+				compactCfg["todo_status"] = strings.Join(allTodoLines, "\n")
+			}
+		}
+	}
+
+	if snapHash, ok := pm.Config["session_snap_hash"].(string); ok && snapHash != "" {
+		if ws, ok := pm.Config["workspace"].(string); ok && ws != "" {
+			sm := util.NewSnapshotManager(ws)
+			if diff := sm.Diff(snapHash); diff != nil {
+				compactCfg["snapshot_diff"] = *diff
+			}
+		}
+	}
+
 	if autoCompaction {
 		compacted := CompactMessages(ctx, history, compactCfg, modelContext, client, onProgress)
 		if len(compacted) < len(history) {
@@ -93,22 +116,20 @@ func (pm *PromptManager) PrepareMessages(ctx context.Context, agentID string, mo
 	todoStatus := ""
 	if pm.Session != nil && pm.Session.Repo != nil {
 		if todos, err := pm.Session.Repo.ListTodos(pm.Session.SessionID); err == nil && len(todos) > 0 {
-			var lines []string
+			var activeLines []string
 			for _, t := range todos {
-				marker := "[ ]"
-				switch t.Status {
-				case "pending":
-					marker = "[ ]"
-				case "in_progress":
-					marker = "[~]"
-				case "completed":
-					marker = "[x]"
-				case "cancelled":
-					marker = "[-]"
+				if t.Status == "completed" || t.Status == "cancelled" {
+					continue
 				}
-				lines = append(lines, fmt.Sprintf("%s %s: %s", marker, t.ID, t.Content))
+				marker := "[ ]"
+				if t.Status == "in_progress" {
+					marker = "[~]"
+				}
+				activeLines = append(activeLines, fmt.Sprintf("%s %s: %s", marker, t.ID, t.Content))
 			}
-			todoStatus = "\n\n# Active Tasks / Todo List\n" + strings.Join(lines, "\n")
+			if len(activeLines) > 0 {
+				todoStatus = "\n\n# Active Tasks / Todo List\n" + strings.Join(activeLines, "\n")
+			}
 		}
 	}
 

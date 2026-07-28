@@ -260,6 +260,20 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
 		}
 	}
 	contextStr := strings.Join(contexts, "\n\n")
+	var extraContexts []string
+	if todoStatus, ok := config["todo_status"].(string); ok && strings.TrimSpace(todoStatus) != "" {
+		extraContexts = append(extraContexts, fmt.Sprintf("<active-todo-checklist>\n%s\n</active-todo-checklist>", strings.TrimSpace(todoStatus)))
+	}
+	if snapDiff, ok := config["snapshot_diff"].(string); ok && strings.TrimSpace(snapDiff) != "" {
+		if len(snapDiff) > 4000 {
+			snapDiff = snapDiff[:4000] + "\n...[diff truncated]..."
+		}
+		extraContexts = append(extraContexts, fmt.Sprintf("<empirical-workspace-code-diff>\n%s\n</empirical-workspace-code-diff>", strings.TrimSpace(snapDiff)))
+	}
+	extraStr := strings.Join(extraContexts, "\n\n")
+	if extraStr != "" {
+		contextStr = extraStr + "\n\n" + contextStr
+	}
 
 	var promptText string
 	jsonSchema := `CRITICAL: You MUST strictly output ONLY a valid JSON object with the following schema:
@@ -273,7 +287,11 @@ func CompactWithLLM(ctx context.Context, messages []Message, config map[string]a
   },
   "current_work_and_next_steps": "A very brief, single-sentence summary of the current work and immediate next step."
 }
-Keep all text descriptions and array items extremely concise and short. Do not include markdown formatting or any other text outside the JSON object.`
+CRITICAL RECONCILIATION RULES:
+1. Cross-reference the empirical workspace code diff and active TODO checklist against conversation history.
+2. If a TODO item's code changes are already present in the workspace code diff or finished in history, mark it as completed/accomplished. Do NOT list completed steps under 'outstanding_requests'.
+3. Retain only truly unresolved tasks in 'outstanding_requests'.
+4. Keep all text descriptions and array items extremely concise and short. Do not include markdown formatting or any other text outside the JSON object.`
 
 	if previousSummary != "" {
 		summaryTokens := EstimateTokens([]Message{
@@ -483,8 +501,18 @@ CRITICAL: Keep descriptions and tasks extremely short and concise (e.g. single-l
 		}
 	}
 
-	result := make([]Message, 0, len(protectedMsgs)+1+len(recent))
+	var firstUserMsg *Message
+	if len(messages) > 0 && messages[0].Role == "user" {
+		firstUserMsg = &messages[0]
+	}
+
+	result := make([]Message, 0, len(protectedMsgs)+2+len(recent))
 	seenMessageIDs := make(map[string]struct{})
+
+	if firstUserMsg != nil {
+		seenMessageIDs[firstUserMsg.ID] = struct{}{}
+		result = append(result, *firstUserMsg)
+	}
 
 	for _, msg := range protectedMsgs {
 		if _, ok := seenMessageIDs[msg.ID]; !ok {
@@ -518,6 +546,9 @@ func PruneMessages(messages []Message, config map[string]any, targetTokens int) 
 	}
 
 	protected := make(map[int]struct{})
+	if len(messages) > 0 && messages[0].Role == "user" {
+		protected[0] = struct{}{}
+	}
 	
 	allTurns := groupIntoTurns(messages)
 	msgIndex := 0
@@ -552,18 +583,26 @@ func PruneMessages(messages []Message, config map[string]any, targetTokens int) 
 			hasKeptResult := false
 			missingKeptResult := false
 
+			var keptParts []MessagePart
+
 			for _, part := range msg.Parts {
 				if part.Type == "tool_use" {
 					if _, ok := keptToolCallIDs[part.ToolCallID]; ok {
 						hasKeptResult = true
+						keptParts = append(keptParts, part)
 					} else {
 						missingKeptResult = true
 					}
+				} else {
+					keptParts = append(keptParts, part)
 				}
 			}
 
 			if hasKeptResult {
 				keep = true // Force keep to prevent dangling tool result
+				if missingKeptResult {
+					msg.Parts = keptParts
+				}
 			} else if missingKeptResult {
 				keep = false // Drop if we dropped the tool result
 			}
@@ -627,6 +666,13 @@ func PruneMessages(messages []Message, config map[string]any, targetTokens int) 
 			}
 		}
 		result = append([]Message(nil), messages[start:]...)
+	}
+
+	if len(messages) > 0 && messages[0].Role == "user" {
+		if _, ok := seenMessageIDs[messages[0].ID]; !ok {
+			seenMessageIDs[messages[0].ID] = struct{}{}
+			result = append([]Message{messages[0]}, result...)
+		}
 	}
 
 	if EstimateTokens(result) > targetTokens {

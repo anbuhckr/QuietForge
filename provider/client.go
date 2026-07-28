@@ -120,18 +120,31 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 			result, callErr := callFn(instance, *req)
 			if callErr == nil {
 				c.mu.Lock()
-				if req.MaxTokens > 0 && !maxTokensReduced && req.MaxTokens > c.knownMaxTokens {
-					c.knownMaxTokens = req.MaxTokens
+				if req.MaxTokens > 0 {
+					if maxTokensReduced {
+						c.knownMaxTokens = req.MaxTokens
+					} else if req.MaxTokens > c.knownMaxTokens {
+						c.knownMaxTokens = req.MaxTokens
+					}
 				}
 				c.SuccessfulProviderID = instance.ID
 
 				// If a fallback was successful, promote it to the front so subsequent tool calls in this engine run use it immediately
 				if i > 0 {
-					newClients := make([]ProviderInstance, 0, len(c.clients))
-					newClients = append(newClients, c.clients[i])
-					newClients = append(newClients, c.clients[:i]...)
-					newClients = append(newClients, c.clients[i+1:]...)
-					c.clients = newClients
+					targetIdx := -1
+					for idx, p := range c.clients {
+						if p.Client == instance.Client {
+							targetIdx = idx
+							break
+						}
+					}
+					if targetIdx > 0 {
+						newClients := make([]ProviderInstance, 0, len(c.clients))
+						newClients = append(newClients, c.clients[targetIdx])
+						newClients = append(newClients, c.clients[:targetIdx]...)
+						newClients = append(newClients, c.clients[targetIdx+1:]...)
+						c.clients = newClients
+					}
 				}
 				
 				c.mu.Unlock()
@@ -143,11 +156,22 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 			if strings.Contains(errStr, "1214") || strings.Contains(errStr, "context length") || strings.Contains(errStr, "maximum context") {
 				return nil, fmt.Errorf("context window exceeded: %w", err)
 			}
-			if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid api key") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many") {
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many") {
+				msg := fmt.Sprintf("%s rate limit/quota error: %v, falling back immediately", label, err)
+				if Debug {
+					log.Printf("[DEBUG] %s", msg)
+				}
+				if c.OnEvent != nil {
+					c.OnEvent(msg)
+				}
+				break
+			}
+
+			if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid api key") {
 				if retries >= 2 {
 					break
 				}
-				msg := fmt.Sprintf("%s hard error: %v, retrying (Attempt %d/3) before fallback", label, err, retries+1)
+				msg := fmt.Sprintf("%s proxy/connection error: %v, retrying (Attempt %d/3) before fallback", label, err, retries+1)
 				if Debug {
 					log.Printf("[DEBUG] %s", msg)
 				}

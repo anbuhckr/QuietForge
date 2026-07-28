@@ -241,6 +241,14 @@ func (t *mcpDynamicTool) Execute(args []byte, ctx *ToolContext) (*ToolResult, er
 			}
 		}
 		outStr = string(v)
+	case json.RawMessage:
+		b := []byte(v)
+		if looksBinary(b) {
+			if r := handleBinaryMcpOutput(b, t); r != nil {
+				return r, nil
+			}
+		}
+		outStr = string(b)
 	case string:
 		b := []byte(v)
 		if looksBinary(b) {

@@ -181,51 +181,16 @@ code.hljs {
 .mobile-toggle:hover { background: rgba(255, 255, 255,0.05); }
 .mobile-toggle svg { width: 18px; height: 18px; }
 
-.chat { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px; display: flex; flex-direction: column; gap: 20px; scroll-behavior: smooth; }
+.chat { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
 .chat::-webkit-scrollbar { width: 4px; }
 .chat::-webkit-scrollbar-thumb { background: rgba(255, 255, 255,0.1); border-radius: 4px; }
+.compact-log { contain: content; }
+.compact-log .live-entry { margin: 0; padding: 2px 0; line-height: 1.4; font-size: 11px; }
+.compact-log .live-entry p { margin: 2px 0 !important; }
 
-.msg { max-width: 80%; display: flex; flex-direction: column; opacity: 0; animation: fadeIn 0.3s forwards; min-width: 0; }
+.msg { max-width: 80%; display: flex; flex-direction: column; min-width: 0; }
 @keyframes fadeIn { to { opacity: 1; transform: translateY(0); } from { transform: translateY(5px); } }
-.msg.user { align-self: flex-end; align-items: flex-end; position: sticky; top: 24px; z-index: 10; transition: max-width 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, transform 0.2s ease; max-width: 80%; }
-.msg.user.hidden-sticky { opacity: 0 !important; pointer-events: none !important; transform: translateY(-10px); }
-
-.msg.user .bubble {
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.msg.user.sticking {
-  max-width: 280px;
-  height: var(--natural-height);
-  pointer-events: none;
-}
-.msg.user.sticking .bubble {
-  max-height: 2.2em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 6px 12px;
-  border-radius: 12px;
-  font-size: 11px;
-  background: rgba(38, 44, 54, 0.95);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  cursor: pointer;
-  pointer-events: auto;
-}
-
-.msg.user.sticking:hover {
-  max-width: 80%;
-}
-.msg.user.sticking:hover .bubble {
-  max-height: 500px;
-  white-space: pre-wrap;
-  overflow: visible;
-  text-overflow: clip;
-  padding: 12px 16px;
-  border-radius: 16px;
-  font-size: 13px;
-  background: rgba(38, 44, 54, 0.95);
-}
+.msg.user { align-self: flex-end; align-items: flex-end; max-width: 80%; }
 .msg.agent { align-self: flex-start; align-items: flex-start; width: 100%; }
 
 .msg .label { display: none; }
@@ -235,7 +200,7 @@ code.hljs {
   white-space: pre-wrap; word-wrap: break-word; word-break: break-word; overflow-wrap: anywhere;
   min-width: 0; max-width: 100%; box-sizing: border-box; overflow-x: auto;
 }
-.chat-turn { display: flex; flex-direction: column; gap: 20px; }
+.chat-turn { display: flex; flex-direction: column; gap: 20px; contain: content; }
 .msg.user .bubble { background: rgba(38, 44, 54, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-bottom-right-radius: 4px; }
 .msg.agent .bubble { background: transparent; padding-left: 0; overflow-x: hidden; }
 .revert-btn {

@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -293,7 +294,16 @@ func (s *Session) AddMessage(message Message) error {
 			return err
 		}
 
-		partsJSON, _ := json.Marshal(message.Parts)
+		displayParts := make([]MessagePart, len(message.Parts))
+		for i, p := range message.Parts {
+			displayParts[i] = p
+			if p.Type == "text" && strings.HasPrefix(strings.TrimSpace(p.Content), "{") && strings.Contains(p.Content, `"context":`) {
+				if idx := strings.Index(p.Content, "\n\n"); idx != -1 {
+					displayParts[i].Content = strings.TrimSpace(p.Content[idx+2:])
+				}
+			}
+		}
+		partsJSON, _ := json.Marshal(displayParts)
 		metaJSON := []byte("{}")
 		isSilent := false
 		if message.Metadata != nil {

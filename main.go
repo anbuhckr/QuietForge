@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,17 +108,32 @@ func reloadAppConfig(workspaceDir string) {
 	}
 }
 
-func buildProviderInstance(id, apiKey, baseURL, model string, disableVision bool) *provider.ProviderInstance {
-	if apiKey == "" {
-		return nil
-	}
+type authStrippingTransport struct {
+	Transport http.RoundTripper
+}
+
+func (c *authStrippingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Del("Authorization")
+	return c.Transport.RoundTrip(req)
+}
+
+func buildProviderInstance(id, apiKey, baseURL, model string, disableVision bool, proxy string) *provider.ProviderInstance {
 	ocfg := openai.DefaultConfig(apiKey)
 	if baseURL != "" {
 		ocfg.BaseURL = baseURL
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 300 * time.Second
-	ocfg.HTTPClient = &http.Client{Transport: transport}
+	if proxy != "" {
+		if proxyURL, err := url.Parse(proxy); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+	if apiKey == "" {
+		ocfg.HTTPClient = &http.Client{Transport: &authStrippingTransport{Transport: transport}}
+	} else {
+		ocfg.HTTPClient = &http.Client{Transport: transport}
+	}
 	return &provider.ProviderInstance{
 		ID:            id,
 		Client:        openai.NewClientWithConfig(ocfg),
@@ -150,8 +166,19 @@ func clientFromCfg(cfg config.Config) *provider.Client {
 		if pc.DisableVision != nil {
 			dv = *pc.DisableVision
 		}
-		if inst := buildProviderInstance(pid, key, base, mdl, dv); inst != nil {
+		if inst := buildProviderInstance(pid, key, base, mdl, dv, ""); inst != nil {
 			instances = append(instances, *inst)
+		}
+		
+		if pc.Proxies != nil && *pc.Proxies != "" {
+			for _, prx := range strings.Split(*pc.Proxies, ",") {
+				prx = strings.TrimSpace(prx)
+				if prx != "" {
+					if inst := buildProviderInstance(pid, key, base, mdl, dv, prx); inst != nil {
+						instances = append(instances, *inst)
+					}
+				}
+			}
 		}
 	}
 
@@ -170,7 +197,7 @@ func clientFromCfg(cfg config.Config) *provider.Client {
 	}
 
 	if len(instances) == 0 {
-		if inst := buildProviderInstance("primary", os.Getenv("OPENAI_API_KEY"), "", globalModel, false); inst != nil {
+		if inst := buildProviderInstance("primary", os.Getenv("OPENAI_API_KEY"), "", globalModel, false, ""); inst != nil {
 			instances = append(instances, *inst)
 		}
 	}
@@ -227,7 +254,11 @@ func promoteFallbackProvider(c *provider.Client, addEvt func(string, map[string]
 					saveRawConfig(rawCfg)
 					appCfg = loadCfg()
 					if addEvt != nil {
-						addEvt("primary_changed", map[string]any{"new_primary_id": "primary"})
+						newModel := ""
+						if pc, ok := appCfg.Provider["primary"]; ok && pc.Model != nil {
+							newModel = *pc.Model
+						}
+						addEvt("primary_changed", map[string]any{"new_primary_id": "primary", "new_model": newModel})
 					}
 				}
 			}
@@ -473,7 +504,7 @@ func listProjectConversations(workspace string) ([]map[string]any, error) {
 						for _, p := range parts {
 							if p.Type == "text" && p.Content != "" {
 								text := strings.TrimSpace(p.Content)
-								
+
 								// Mirror frontend logic: Strip prepended context block if present
 								if strings.HasPrefix(text, "{") && strings.Contains(text, `"context":`) {
 									parts := strings.Split(text, "\n\n")
@@ -779,7 +810,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.6")
+		fmt.Println("QuietForge v1.1.7")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1523,7 +1554,8 @@ func setupChatRoutes(api fiber.Router) {
 		}
 		body := c.Body()
 		var payload struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			debugLog("/chat/delete: invalid JSON body: %v", err)
@@ -1534,9 +1566,12 @@ func setupChatRoutes(api fiber.Router) {
 			convID = activeConversation
 		}
 		debugLog("/chat/delete: convID=%s", convID)
-		// Search all registered projects for the session to delete
+		// Search registered projects for the session to delete
 		pr := loadProjectRegistry()
 		for _, p := range pr.Projects {
+			if payload.Workspace != "" && !isAbsPathEqual(p.Path, payload.Workspace) {
+				continue
+			}
 			dbPath := filepath.Join(p.Path, ".agent", "sessions.db")
 			if !fileExists(dbPath) {
 				continue
@@ -1554,25 +1589,21 @@ func setupChatRoutes(api fiber.Router) {
 		}
 		if convID == activeConversation {
 			activeSession = nil
-			// Find next conversation
+			// Find next conversation in the active workspace
 			found := false
-			for _, p := range pr.Projects {
-				dbPath := filepath.Join(p.Path, ".agent", "sessions.db")
-				if !fileExists(dbPath) {
-					continue
-				}
-				d, err := storage.NewDatabase(dbPath)
-				if err != nil {
-					continue
-				}
-				r := storage.NewRepository(d)
-				remaining, _ := r.ListSessions(1, p.Path)
-				d.Close()
-				if len(remaining) > 0 {
-					activeConversation = remaining[0].ID
-					debugLog("/chat/delete: next conversation %s", activeConversation)
-					found = true
-					break
+			if workspaceDir != "" {
+				dbPath := filepath.Join(workspaceDir, ".agent", "sessions.db")
+				if fileExists(dbPath) {
+					if d, err := storage.NewDatabase(dbPath); err == nil {
+						r := storage.NewRepository(d)
+						remaining, _ := r.ListSessions(1, workspaceDir)
+						d.Close()
+						if len(remaining) > 0 {
+							activeConversation = remaining[0].ID
+							debugLog("/chat/delete: next conversation %s", activeConversation)
+							found = true
+						}
+					}
 				}
 			}
 			if !found {
@@ -1644,7 +1675,7 @@ func setupChatRoutes(api fiber.Router) {
 		if ws == "" {
 			ws = workspaceDir
 		}
-		
+
 		if snapHash != "" {
 			sm := util.NewSnapshotManager(ws)
 			if !sm.Restore(snapHash) {
@@ -1763,6 +1794,7 @@ func setupConfigRoutes(api fiber.Router) {
 			MaxMessages   int     `json:"max_messages"`
 			InputPrice    float64 `json:"input_price"`
 			OutputPrice   float64 `json:"output_price"`
+			Proxies       string  `json:"proxies"`
 		}
 
 		providers := make([]providerInfo, 0)
@@ -1807,6 +1839,10 @@ func setupConfigRoutes(api fiber.Router) {
 			if pc.OutputPrice != nil {
 				outPrice = *pc.OutputPrice
 			}
+			prx := ""
+			if pc.Proxies != nil {
+				prx = *pc.Proxies
+			}
 			providers = append(providers, providerInfo{
 				ID:            pid,
 				Model:         mdl,
@@ -1817,6 +1853,7 @@ func setupConfigRoutes(api fiber.Router) {
 				MaxMessages:   mm,
 				InputPrice:    inPrice,
 				OutputPrice:   outPrice,
+				Proxies:       prx,
 			})
 		}
 
@@ -1888,6 +1925,7 @@ func setupConfigRoutes(api fiber.Router) {
 			MaxMessages   int     `json:"max_messages"`
 			InputPrice    float64 `json:"input_price"`
 			OutputPrice   float64 `json:"output_price"`
+			Proxies       string  `json:"proxies"`
 		}
 		payload := new(struct {
 			Providers   []provPayload `json:"providers"`
@@ -1926,7 +1964,11 @@ func setupConfigRoutes(api fiber.Router) {
 					}
 				}
 
-				if p.APIKey != "" && !strings.HasSuffix(p.APIKey, "...") {
+				if p.APIKey == "***" || strings.HasSuffix(p.APIKey, "...") {
+					// Leave existing key unchanged
+				} else if p.APIKey == "" {
+					delete(pCfg, "api_key")
+				} else {
 					pCfg["api_key"] = p.APIKey
 					if i == 0 {
 						os.Setenv("OPENAI_API_KEY", p.APIKey)
@@ -1960,6 +2002,11 @@ func setupConfigRoutes(api fiber.Router) {
 					pCfg["output_price"] = p.OutputPrice
 				} else {
 					delete(pCfg, "output_price")
+				}
+				if p.Proxies != "" {
+					pCfg["proxies"] = p.Proxies
+				} else {
+					delete(pCfg, "proxies")
 				}
 
 				newProvMap[newID] = pCfg
@@ -2685,7 +2732,7 @@ func setupToolRoutes(api fiber.Router) {
 				dv = *pc.DisableVision
 			}
 
-			inst := buildProviderInstance(providerID, key, base, mdl, dv)
+			inst := buildProviderInstance(providerID, key, base, mdl, dv, "")
 			if inst == nil {
 				return c.JSON(fiber.Map{"ok": false, "detail": "No API key configured for this provider"})
 			}
@@ -2997,7 +3044,19 @@ func spawnSubagent(prompt, agentType string) (string, <-chan string, error) {
 		sessionRepo = repo
 	}
 
-	subSession := session.NewSession(newSessionID, sessionRepo, agentType, configToDict(appCfg), worktreePath)
+	cfgDict := configToDict(appCfg)
+	envMap := make(map[string]any)
+	if e, ok := cfgDict["env"].(map[string]any); ok {
+		for k, v := range e {
+			envMap[k] = v
+		}
+	}
+	if workspace != "" {
+		envMap["SHARED_ARTIFACTS_DIR"] = filepath.Join(workspace, ".agent", "artifacts")
+	}
+	cfgDict["env"] = envMap
+
+	subSession := session.NewSession(newSessionID, sessionRepo, agentType, cfgDict, worktreePath)
 	if err := subSession.Save(); err != nil {
 		return "", nil, err
 	}
@@ -3114,6 +3173,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 	sp := session.NewSessionProcessor(toolRegistry, permRules, askPermissionCallback, workspace)
 	sp.SnapHash = snapHash
 	var fullContent string
+	var subEmptyRetriesCount int
 
 	for i := 0; i < maxSubagentCycles; i++ {
 		debugLog("runSubEngine: cycle %d/50 starting", i)
@@ -3203,6 +3263,12 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		}
 
 		cycleContent = strings.TrimSpace(cycleContent)
+		if len(toolCalls) == 0 && cycleContent != "" {
+			if xmlCalls := util.ParseXMLToolCalls(cycleContent); len(xmlCalls) > 0 {
+				toolCalls = append(toolCalls, xmlCalls...)
+				debugLog("runSubEngine: cycle %d parsed %d fallback XML tool calls from text", i, len(xmlCalls))
+			}
+		}
 		astMsg := session.Message{
 			ID:        generateMsgID(),
 			SessionID: subSession.SessionID,
@@ -3229,8 +3295,38 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		subSession.Save()
 
 		if len(toolCalls) == 0 {
+			cleanedText := regexp.MustCompile(`(?is)<(?:think|thought)>.*?</(?:think|thought)>`).ReplaceAllString(cycleContent, "")
+			cleanedText = strings.TrimSpace(cleanedText)
+
+			if cleanedText == "" {
+				if subEmptyRetriesCount < 1 && i < maxSubagentCycles-1 {
+					subEmptyRetriesCount++
+					debugLog("runSubEngine: cycle %d empty thinking completion detected (retry %d), auto-retrying turn", i, subEmptyRetriesCount)
+					autoMsg := session.Message{
+						ID:        generateMsgID(),
+						SessionID: subSession.SessionID,
+						Role:      "user",
+						CreatedAt: time.Now().UnixMilli(),
+						Metadata:  map[string]any{"silent": true},
+						Parts: []session.MessagePart{{
+							Type:    "text",
+							Content: "System Notice: Your previous response contained only internal thinking tags with no message text or tool calls. Please continue your response or execute the next tool.",
+						}},
+					}
+					subSession.AddMessage(autoMsg)
+					subSession.Save()
+					continue
+				} else {
+					subEmptyRetriesCount = 0
+				}
+			} else {
+				subEmptyRetriesCount = 0
+			}
+
 			debugLog("runSubEngine: cycle %d finished (no tool calls)", i)
 			break
+		} else {
+			subEmptyRetriesCount = 0
 		}
 
 		isBatchReadOnly := true
@@ -3646,6 +3742,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	sp.SnapHash = snapHash
 	var fullContent string
 	var originalCtxWindow int
+	var emptyRetriesCount int
 
 	var i int
 	for i = 0; i < maxEngineCycles; i++ {
@@ -3996,6 +4093,13 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			}
 		}
 
+		if len(toolCalls) == 0 && cycleContent != "" {
+			if xmlCalls := util.ParseXMLToolCalls(cycleContent); len(xmlCalls) > 0 {
+				toolCalls = append(toolCalls, xmlCalls...)
+				debugLog("runEngine: cycle %d parsed %d fallback XML tool calls from text", i, len(xmlCalls))
+			}
+		}
+
 		assistantMsg := session.Message{
 			ID:        generateMsgID(),
 			SessionID: activeSession.SessionID,
@@ -4020,6 +4124,36 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		promoteFallbackProvider(client, addLiveEvent)
 
 		if len(toolCalls) == 0 {
+			cleanedText := regexp.MustCompile(`(?is)<(?:think|thought)>.*?</(?:think|thought)>`).ReplaceAllString(cycleContent, "")
+			cleanedText = strings.TrimSpace(cleanedText)
+
+			if cleanedText == "" {
+				if emptyRetriesCount < 1 && i < maxEngineCycles-1 {
+					emptyRetriesCount++
+					debugLog("runEngine: cycle %d empty thinking completion detected (retry %d), auto-retrying turn", i, emptyRetriesCount)
+					addLiveEvent("activity", map[string]any{"event": "Empty thinking completion detected, auto-retrying turn..."})
+
+					autoMsg := session.Message{
+						ID:        generateMsgID(),
+						SessionID: activeSession.SessionID,
+						Role:      "user",
+						CreatedAt: time.Now().UnixMilli(),
+						Metadata:  map[string]any{"silent": true},
+						Parts: []session.MessagePart{{
+							Type:    "text",
+							Content: "System Notice: Your previous response contained only internal thinking tags with no message text or tool calls. Please continue your response or execute the next tool.",
+						}},
+					}
+					activeSession.AddMessage(autoMsg)
+					continue
+				} else {
+					debugLog("runEngine: cycle %d consecutive empty completions, stopping loop", i)
+					emptyRetriesCount = 0
+				}
+			} else {
+				emptyRetriesCount = 0
+			}
+
 			if goalMode && i < maxEngineCycles-1 {
 				debugLog("runEngine: cycle %d no tool calls, but in goalMode, auto-replying", i)
 				addLiveEvent("activity", map[string]any{"event": "Auto-proceeding..."})
@@ -4029,6 +4163,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					SessionID: activeSession.SessionID,
 					Role:      "user",
 					CreatedAt: time.Now().UnixMilli(),
+					Metadata:  map[string]any{"silent": true},
 					Parts: []session.MessagePart{{
 						Type:    "text",
 						Content: "You are in goal mode. You must use tools to proceed. Do not stop to ask questions. Please execute the next tool.",
@@ -4048,6 +4183,8 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				}
 			}
 			break
+		} else {
+			emptyRetriesCount = 0
 		}
 
 		isBatchReadOnly := true
@@ -4272,6 +4409,18 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					Attachments: result.Attachments,
 				})
 				activeSession.AddMessage(resultMsg)
+			}
+		}
+	}
+
+	// Auto-complete remaining todos when engine finishes
+	if activeSession != nil && activeSession.Repo != nil {
+		if remainingTodos, err := activeSession.Repo.ListTodos(activeSession.SessionID); err == nil {
+			for _, td := range remainingTodos {
+				if td.Status == "pending" || td.Status == "in_progress" {
+					activeSession.Repo.UpdateTodo(td.ID, map[string]any{"status": "completed"})
+					debugLog("runEngine: auto-completed todo %s (%s)", td.ID, td.Content)
+				}
 			}
 		}
 	}
@@ -4565,12 +4714,12 @@ func createArtifacts(workspace, snapHash string, agentModifiedFiles map[string]b
 
 		if len(dOut) > 0 {
 			diffContent = strings.TrimSpace(string(dOut))
-			
+
 			// Detect if git diff emitted a fake deletion patch for an untracked file that actually exists
 			if strings.Contains(diffContent, "\ndeleted file mode ") && fileExists(absPath) {
 				diffContent = ""
 			}
-			
+
 			// Fix paths in --no-index output to match standard git diff
 			if revertedFiles[relPath] != "" && diffContent != "" {
 				lines := strings.Split(diffContent, "\n")
@@ -4608,7 +4757,7 @@ func createArtifacts(workspace, snapHash string, agentModifiedFiles map[string]b
 						cmdDiff := exec.Command("git", "diff", "--ignore-cr-at-eol", "--ignore-space-at-eol", "--no-index", tmpFile.Name(), absPath)
 						diffOut, _ := cmdDiff.Output()
 						os.Remove(tmpFile.Name())
-						
+
 						diffContent = strings.TrimSpace(string(diffOut))
 						if diffContent != "" {
 							lines := strings.Split(diffContent, "\n")

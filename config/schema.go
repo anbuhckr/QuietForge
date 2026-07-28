@@ -24,6 +24,7 @@ type ProviderConfig struct {
 	MaxMessages   *int              `json:"max_messages,omitempty"`
 	InputPrice    *float64          `json:"input_price,omitempty"`
 	OutputPrice   *float64          `json:"output_price,omitempty"`
+	Proxies       *string           `json:"proxies,omitempty"`
 	Options       map[string]any    `json:"options"`
 }
 

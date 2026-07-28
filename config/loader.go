@@ -146,6 +146,9 @@ func parseConfig(data map[string]any) Config {
 		if outPrice, ok := pc["output_price"].(float64); ok {
 			pConf.OutputPrice = &outPrice
 		}
+		if proxies, ok := pc["proxies"].(string); ok {
+			pConf.Proxies = &proxies
+		}
 		if opts, ok := pc["options"].(map[string]any); ok {
 			pConf.Options = opts
 		} else {
@@ -347,6 +350,9 @@ func configToDict(cfg Config) map[string]any {
 			}
 			if v.OutputPrice != nil {
 				pd["output_price"] = *v.OutputPrice
+			}
+			if v.Proxies != nil {
+				pd["proxies"] = *v.Proxies
 			}
 			pd["options"] = v.Options
 			providers[k] = pd

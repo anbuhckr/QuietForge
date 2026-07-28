@@ -214,6 +214,10 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 
 	// 3. Ensure no message has an empty Content string to prevent 'omitempty' dropping the field
 	for i := range sanitized {
+		if len(sanitized[i].MultiContent) > 0 {
+			sanitized[i].Content = "" // Must be strictly empty if MultiContent is used
+			continue
+		}
 		if sanitized[i].Content == "" {
 			if sanitized[i].Role == "tool" {
 				sanitized[i].Content = "(empty)"

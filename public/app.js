@@ -255,9 +255,11 @@ if (window.marked && window.hljs && window.markedHighlight) {
     langPrefix: 'hljs language-',
     highlight(code, lang) {
       if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(code, { language: lang }).value;
+        try {
+          return hljs.highlight(code, { language: lang }).value;
+        } catch (e) {}
       }
-      return hljs.highlightAuto(code).value;
+      return esc(code);
     }
   }));
 }
@@ -268,9 +270,22 @@ function chatIsNearBottom(threshold = 90) {
   return c.scrollHeight - c.clientHeight <= c.scrollTop + threshold;
 }
 
-function scrollChatToBottom() {
-  const c = $('chat');
-  c.scrollTop = c.scrollHeight;
+function scrollChatToBottom(instant = false) {
+  requestAnimationFrame(() => {
+    const c = $('chat');
+    if (!c) return;
+    if (instant) {
+      const orig = c.style.scrollBehavior;
+      c.style.scrollBehavior = 'auto';
+      c.scrollTop = c.scrollHeight;
+      requestAnimationFrame(() => {
+        c.scrollTop = c.scrollHeight;
+        c.style.scrollBehavior = orig;
+      });
+    } else {
+      c.scrollTop = c.scrollHeight;
+    }
+  });
 }
 
 let runStartTime = 0, runTimerInterval = null;
@@ -416,7 +431,7 @@ class ConversationState {
           turn.messageId = msg.id;
           turn.id = oldTurn.id;
           turn._skipDbParse = true;
-        } else if (oldTurn && oldTurn.id) {
+        } else if (oldTurn && oldTurn.messageId) {
           turn.id = oldTurn.id;
           turn.messageId = msg.id;
           turn._needsFullRender = true;
@@ -475,8 +490,22 @@ class ConversationState {
         }
       }
     });
-    // No pending tools flush needed since they are pushed directly to liveContainer
+
+    // Suppress IntersectionObserver while setting initial scroll position
+    this._suppressLazyObserver = true;
     await this.render();
+    scrollChatToBottom(true);
+    this._suppressLazyObserver = false;
+
+    // Register lazy observer for off-screen turns after viewport is at bottom
+    const chat = document.getElementById('chat');
+    if (chat && this._lazyObserver) {
+      chat.querySelectorAll('.chat-turn').forEach((el, idx) => {
+        if (idx < Math.max(0, this.turns.length - 3) && el.dataset.renderedFinal !== "true") {
+          this._lazyObserver.observe(el);
+        }
+      });
+    }
     } finally {
       const release = resolveLock;
       this._loadPromise = null;
@@ -542,13 +571,23 @@ class ConversationState {
       turn.agent = (turn.agent || '') + rawText;
     } else if (kind === 'done' || kind === 'complete') {
       turn.completed = true;
+      turn._needsFullRender = true;
       if (evt.duration_ms) turn.durationMs = evt.duration_ms;
       if (evt.workspace_changes) turn.workspaceChanges = evt.workspace_changes;
       // const lcSnapshot = turn.liveContainer.map(e => ({ think: e.think, tools: e.tools }));
     }
 
-    requestAnimationFrame(async () => {
-      await this.render();
+    if (kind === 'token' || kind === 'think') {
+      const now = Date.now();
+      if (!this._lastStreamRender || (now - this._lastStreamRender) >= 100) {
+        this._lastStreamRender = now;
+        requestAnimationFrame(() => this.render());
+      }
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      this.render();
     });
   }
 
@@ -589,21 +628,51 @@ class ConversationState {
   }
 
   async render() {
-    while (this._renderPromise) {
-      await this._renderPromise;
+    if (this._isRendering) {
+      this._needsReRender = true;
+      return;
     }
-    let resolveLock;
-    this._renderPromise = new Promise(r => resolveLock = r);
+    this._isRendering = true;
 
     try {
-      const shouldFollow = chatIsNearBottom();
-      const chat = document.getElementById('chat');
+      do {
+        this._needsReRender = false;
+        await this._doRender();
+      } while (this._needsReRender);
+    } finally {
+      this._isRendering = false;
+    }
+  }
 
-      if (this.turns.length === 0) {
-        chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
-        if (shouldFollow) scrollChatToBottom();
-        return;
+  _ensureLazyObserver() {
+    if (this._lazyObserver) return;
+    this._lazyObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          const el = entry.target;
+          const idx = parseInt(el.dataset.turnIdx, 10);
+          if (isNaN(idx) || idx >= this.turns.length) continue;
+          if (el.dataset.renderedFinal === "true") continue;
+          const turn = this.turns[idx];
+          this._renderTurn(el, turn);
+          if (turn.completed) {
+            el.dataset.renderedFinal = "true";
+          }
+          this._lazyObserver.unobserve(el);
+        }
       }
+    }, { root: document.getElementById('chat'), rootMargin: '200px 0px' });
+  }
+
+  async _doRender() {
+    const shouldFollow = chatIsNearBottom();
+    const chat = document.getElementById('chat');
+
+    if (this.turns.length === 0) {
+      chat.innerHTML = '<div class="msg system"><div class="label">System</div><div class="bubble">Ready. Mention workspace context with @todo.py, @recent, @diff.</div></div>';
+      if (shouldFollow) scrollChatToBottom();
+      return;
+    }
 
     if (chat.children.length === 1 && chat.children[0].classList.contains('system')) {
       chat.innerHTML = '';
@@ -613,6 +682,11 @@ class ConversationState {
       chat.removeChild(chat.lastChild);
     }
 
+    this._ensureLazyObserver();
+
+    // Only fully render the last 3 turns immediately; defer older ones
+    const immediateStart = Math.max(0, this.turns.length - 3);
+
     for (let i = 0; i < this.turns.length; i++) {
       const turn = this.turns[i];
       let turnGroup = chat.children[i];
@@ -621,29 +695,53 @@ class ConversationState {
       if (!turnGroup) {
         turnGroup = document.createElement('div');
         turnGroup.className = 'chat-turn';
+        turnGroup.dataset.messageId = turn.messageId || '';
+        turnGroup.dataset.turnIdx = String(i);
         chat.appendChild(turnGroup);
       } else {
-        // Skip re-rendering fully completed historical turns to preserve DOM state
-        if (!isLast && turnGroup.dataset.renderedFinal === "true") {
+        if ((turnGroup.dataset.messageId || '') !== (turn.messageId || '')) {
+          turnGroup.innerHTML = '';
+          turnGroup.dataset.messageId = turn.messageId || '';
+          turnGroup.dataset.turnIdx = String(i);
+          delete turnGroup.dataset.renderedFinal;
+          delete turnGroup.dataset.renderedDiffs;
+        } else if (!isLast && turnGroup.dataset.renderedFinal === "true") {
           continue;
         }
       }
 
+      // Deferred lazy rendering for old completed turns not yet in DOM
+      if (i < immediateStart && turn.completed && turnGroup.children.length === 0) {
+        // Create lightweight placeholder, render on scroll via IntersectionObserver
+        const placeholder = document.createElement('div');
+        placeholder.className = 'msg agent';
+        placeholder.style.minHeight = '48px';
+        if (turn.user && !turn.hidden) {
+          const userDiv = document.createElement('div');
+          userDiv.className = 'msg user';
+          const fullUserText = (turn.user || '').trim();
+          userDiv.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${esc(fullUserText)}</div>`;
+          turnGroup.appendChild(userDiv);
+        }
+        const duration = this.formatRunDuration(turn.durationMs || 0);
+        placeholder.innerHTML = `<div class="bubble markdown-body" style="opacity:0.5;font-style:italic;">Worked for ${esc(duration)} — scroll to load</div>`;
+        turnGroup.appendChild(placeholder);
+        if (!this._suppressLazyObserver) {
+          this._lazyObserver.observe(turnGroup);
+        }
+        continue;
+      }
+
       await this._renderTurn(turnGroup, turn);
 
-      // Mark as final if it's a completed historical turn
-      if (!isLast && turn.completed) {
+      // Mark as final if it's a completed turn
+      if (turn.completed) {
         turnGroup.dataset.renderedFinal = "true";
       }
     }
 
-    updateStickyPrompts();
     if (shouldFollow) scrollChatToBottom();
-    } finally {
-      const release = resolveLock;
-      this._renderPromise = null;
-      if (release) release();
-    }
+    this.updateTimer();
   }
 
   async _renderTurn(turnGroup, turn) {
@@ -669,23 +767,7 @@ class ConversationState {
           d = document.createElement('div');
           d.className = 'msg user';
 
-          let cleanedUser = (turn.user || '').trimStart();
-          if (cleanedUser.startsWith('{') && cleanedUser.includes('"context":')) {
-            const regex = /\r?\n\r?\n/g;
-            let match;
-            while ((match = regex.exec(cleanedUser)) !== null) {
-              let possibleJson = cleanedUser.substring(0, match.index);
-              try {
-                let parsed = JSON.parse(possibleJson);
-                if (parsed.context) {
-                  cleanedUser = cleanedUser.substring(match.index + match[0].length);
-                  break;
-                }
-              } catch (e) {
-                // keep looking
-              }
-            }
-          }
+          let cleanedUser = (turn.user || '').trim();
 
           let content = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(cleanedUser)) : esc(cleanedUser);
           content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
@@ -744,7 +826,7 @@ class ConversationState {
         } else {
           details.classList.add('flat-live');
           details.open = true;
-          details.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;">Running background tasks...</span><span class="timer" style="margin-left:8px; opacity:0.6; font-variant-numeric: tabular-nums;"></span></summary>` + sharedLogHtml;
+          details.innerHTML = `<summary style="cursor:pointer; display:flex; align-items:center;"><span style="margin-right:8px; font-size:10px; opacity:0.7;">▼</span><span class="livetext" style="font-weight:600;">Running background tasks...</span><span class="timer" style="margin-left:8px; opacity:0.6; font-family:var(--mono); font-variant-numeric: tabular-nums; display:inline-block; min-width:65px;"></span></summary>` + sharedLogHtml;
         }
 
         details.dataset.completedState = turn.completed ? "true" : "false";
@@ -797,13 +879,18 @@ class ConversationState {
         for (let i = renderedCount; i < turn.liveContainer.length; i++) {
           const block = turn.liveContainer[i];
           if (block.think) {
-            let html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
-            if (!html.trim()) html = esc(block.think);
             const entry = document.createElement('div');
             entry.className = 'live-entry markdown-body';
             entry.dataset.thinkIdx = i;
             entry.dataset.len = block.think.length;
-            entry.innerHTML = html;
+            if (turn.completed) {
+              let html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+              if (!html.trim()) html = esc(block.think);
+              entry.innerHTML = html;
+            } else {
+              entry.style.whiteSpace = 'pre-wrap';
+              entry.textContent = block.think;
+            }
             log.appendChild(entry);
           }
           if (block.tools) {
@@ -821,36 +908,54 @@ class ConversationState {
             log.dataset['t_' + i] = block.tools.length;
           }
         }
-        log.dataset.count = turn.liveContainer.length;
+            log.dataset.count = turn.liveContainer.length;
+        if (isScrolledToBottom || renderedCount === 0) {
+          log.scrollTop = log.scrollHeight;
+        }
       }
-      for (let i = 0; i < Math.min(turn.liveContainer.length, renderedCount); i++) {
-        const block = turn.liveContainer[i];
-        if (block.think) {
-          const thinkNode = log.querySelector(`[data-think-idx="${i}"]`);
-          if (thinkNode) {
-            const currentLen = parseInt(thinkNode.dataset.len || "0", 10);
-            if (block.think.length > currentLen) {
-              thinkNode.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
-              thinkNode.dataset.len = block.think.length;
+      if (turn.liveContainer.length > 0 && renderedCount > 0) {
+        const lastIdx = turn.liveContainer.length - 1;
+        const block = turn.liveContainer[lastIdx];
+        if (block) {
+          if (block.think) {
+            const thinkNode = log.querySelector(`[data-think-idx="${lastIdx}"]`);
+            if (thinkNode) {
+              const currentLen = parseInt(thinkNode.dataset.len || "0", 10);
+              if (block.think.length > currentLen) {
+                if (turn.completed) {
+                  thinkNode.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+                } else {
+                  thinkNode.textContent = block.think;
+                }
+                thinkNode.dataset.len = block.think.length;
+                if (isScrolledToBottom) {
+                  log.scrollTop = log.scrollHeight;
+                }
+              }
+            }
+          }
+          if (block.tools) {
+            const toolKey = 't_' + lastIdx;
+            const renderedTools = parseInt(log.dataset[toolKey] || "0", 10);
+            if (block.tools.length > renderedTools) {
+              for (let j = renderedTools; j < block.tools.length; j++) {
+                const entry = document.createElement('div');
+                entry.className = 'live-entry markdown-body action-entry';
+                entry.style.animation = 'none';
+                if (block.tools[j] === 'compacting...') {
+                  entry.innerHTML = `<p>⚙️ compacting...</p>`;
+                } else {
+                  entry.innerHTML = `<p>⚙️ ${esc(block.tools[j])}</p>`;
+                }
+                log.appendChild(entry);
+              }
+              log.dataset[toolKey] = block.tools.length;
+              if (isScrolledToBottom) {
+                log.scrollTop = log.scrollHeight;
+              }
             }
           }
         }
-        if (!block.tools) continue;
-        const toolKey = 't_' + i;
-        const renderedTools = parseInt(log.dataset[toolKey] || "0", 10);
-        if (block.tools.length > renderedTools) {
-          for (let j = renderedTools; j < block.tools.length; j++) {
-            const entry = document.createElement('div');
-            entry.className = 'live-entry markdown-body action-entry';
-            entry.style.animation = 'none';
-            entry.innerHTML = `<p>⚙️ ${esc(block.tools[j])}</p>`;
-            log.appendChild(entry);
-          }
-          log.dataset[toolKey] = block.tools.length;
-        }
-      }
-      if (isScrolledToBottom) {
-        log.scrollTop = log.scrollHeight;
       }
     } else {
       let wrapper = turnGroup.querySelector('.live-container');
@@ -858,69 +963,74 @@ class ConversationState {
     }
 
     // 3. Agent Message
-    if (turn.agent || turn.liveContainer.length > 0) {
-      let d = turnGroup.querySelector('.msg.agent');
+    let content = turn.agent || "";
+
+    if (content.includes('<think') || content.includes('<thought')) {
+      content = content.replace(/<(?:think|thought)>([\s\S]*?)(<\/(?:think|thought)>|$)/gi, '').trim();
+    }
+    
+    // Strip XML tool calls to prevent raw JSON arguments from ruining the UI
+    if (content.includes('<invoke') || content.includes('<tool_call>')) {
+      content = content.replace(/<invoke\s+name=["'][^"']+["']\s*>[\s\S]*?<\/invoke>/gi, '');
+      content = content.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '');
+      content = content.trim();
+    }
+
+    // If the model put its entire final response inside a <think> block (common with Qwythos),
+    // it would leave the main bubble completely empty. Promote the last thought back to the main bubble.
+    if (!content && turn.completed && turn.liveContainer.length > 0) {
+      const lastIdx = turn.liveContainer.length - 1;
+      const lastBlock = turn.liveContainer[lastIdx];
+      if (lastBlock.think && lastBlock.tools.length === 0) {
+        content = lastBlock.think;
+        
+        // Remove from the live container DOM to prevent it from appearing in both places
+        const log = turnGroup.querySelector('.compact-log');
+        if (log) {
+          const thinkNode = log.querySelector(`[data-think-idx="${lastIdx}"]`);
+          if (thinkNode) thinkNode.remove();
+        }
+      }
+    }
+
+    const hasTools = turn.liveContainer.some(b => b.tools && b.tools.length > 0);
+    const hasAgentContent = !!content || !!turn.workspaceChanges || hasTools;
+
+    let d = turnGroup.querySelector('.msg.agent');
+    if (hasAgentContent) {
       if (!d) {
         d = document.createElement('div');
         d.className = 'msg agent';
         d.innerHTML = `<div class="label">Agent</div><div class="bubble markdown-body"></div>`;
         turnGroup.appendChild(d);
       }
+      d.style.display = '';
 
-      let content = turn.agent || "";
-
-      // Parse all <think> tags from DeepSeek R1/Qwythos (hide completely in final response, but extract to live block)
-      let match;
-      const thinkRegex = /<(?:think|thought)>([\s\S]*?)(<\/(?:think|thought)>|$)/gi;
-      let blockIndex = 0;
-      while ((match = thinkRegex.exec(content)) !== null) {
-        let thinkText = match[1].trim();
-        if (thinkText && !/\[Thought process omitted/i.test(thinkText)) {
-          // Find next available non-error block
-          while (blockIndex < turn.liveContainer.length &&
-            turn.liveContainer[blockIndex].think &&
-            turn.liveContainer[blockIndex].think.startsWith('❌')) {
-            blockIndex++;
-          }
-
-          if (blockIndex >= turn.liveContainer.length) {
-            turn.liveContainer.push({ think: null, tools: [] });
-          }
-
-          if (!turn.liveContainer[blockIndex].think) {
-            turn.liveContainer[blockIndex].think = thinkText;
-          }
-          blockIndex++;
-        }
-      }
-      content = content.replace(/<(?:think|thought)>([\s\S]*?)(<\/(?:think|thought)>|$)/gi, '').trim();
-
-      // If the model put its entire final response inside a <think> block (common with Qwythos),
-      // it would leave the main bubble completely empty. Promote the last thought back to the main bubble.
-      if (!content && turn.completed && turn.liveContainer.length > 0) {
-        const lastIdx = turn.liveContainer.length - 1;
-        const lastBlock = turn.liveContainer[lastIdx];
-        if (lastBlock.think && lastBlock.tools.length === 0) {
-          content = lastBlock.think;
-          
-          // Remove from the live container DOM to prevent it from appearing in both places
-          const log = turnGroup.querySelector('.compact-log');
-          if (log) {
-            const thinkNode = log.querySelector(`[data-think-idx="${lastIdx}"]`);
-            if (thinkNode) thinkNode.remove();
-          }
-        }
-      }
-
-      if (window.marked) {
-        content = md(content);
-      } else {
-        content = esc(content);
-      }
+      // Fast text update during live streaming; full Markdown parse ONCE on turn completion
+      const contentKey = (turn.completed ? 'comp:' : 'stream:') + content.length + ':' + (content.length > 0 ? content.charCodeAt(0) + content.charCodeAt(content.length - 1) + content.charCodeAt(Math.floor(content.length / 2)) : 0);
 
       const bubble = d.querySelector('.bubble');
-      if (bubble) {
-        bubble.innerHTML = content;
+      if (bubble && bubble.dataset.contentKey !== contentKey) {
+        if (turn.completed) {
+          if (content.length > 5000) {
+            bubble.style.whiteSpace = 'pre-wrap';
+            bubble.textContent = content;
+            setTimeout(() => {
+              if (window.marked) bubble.innerHTML = md(content);
+              else bubble.innerHTML = esc(content);
+            }, 0);
+          } else {
+            if (window.marked) {
+              bubble.innerHTML = md(content);
+            } else {
+              bubble.innerHTML = esc(content);
+            }
+          }
+        } else {
+          bubble.style.whiteSpace = 'pre-wrap';
+          bubble.textContent = content;
+        }
+        bubble.dataset.contentKey = contentKey;
       }
 
       // Render any UI widgets for changed files
@@ -938,26 +1048,21 @@ class ConversationState {
           }
         }
       }
-      if (!content && !turn.workspaceChanges) {
-        const hasTools = turn.liveContainer.some(b => b.tools && b.tools.length > 0);
-        if (!hasTools) {
-          d.remove();
-        }
-      }
     } else {
-      let d = turnGroup.querySelector('.msg.agent');
-      if (d) d.remove();
+      if (d) d.style.display = 'none';
     }
     _updateTokenDisplay();
   }
 
   updateTimer() {
-    if (!running) return;
-    const s = Math.floor((Date.now() - runStartTime) / 1000);
-    const nodes = document.querySelectorAll('.inline-live .timer');
-    nodes.forEach(tEl => {
-      tEl.textContent = `[${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}]`;
-    });
+    if (!running || !runStartTime) return;
+    const elapsedMs = Date.now() - runStartTime;
+    if (elapsedMs < 0) return;
+    const s = Math.floor(elapsedMs / 1000);
+    const activeTimer = document.querySelector('.chat-turn:last-child .inline-live .timer');
+    if (activeTimer) {
+      activeTimer.textContent = `[${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}]`;
+    }
   }
 }
 
@@ -1101,7 +1206,8 @@ async function renderProjects(projects = []) {
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-              id: c.id
+              id: c.id,
+              workspace: p.path
             })
           });
           const d = await r.json();
@@ -1213,7 +1319,10 @@ async function openFile(path) {
 
 let firstStatus = true;
 let statusAbort = null;
+let _inFlightRefresh = false;
 async function refresh() {
+  if (_inFlightRefresh) return;
+  _inFlightRefresh = true;
   const wasFirstStatus = firstStatus;
   try {
     if (statusAbort) statusAbort.abort();
@@ -1340,6 +1449,8 @@ async function refresh() {
       return;
     }
     console.warn('Status refresh skipped:', e);
+  } finally {
+    _inFlightRefresh = false;
   }
 }
 function triggerIndex() {
@@ -1443,6 +1554,7 @@ async function handleAgentEvent(d, isHistory = false) {
     return;
   }
   if (d.type === 'primary_changed') {
+    if (d.new_model) updateModelTag(d.new_model);
     if (!isHistory && !running) await refresh();
     return;
   }
@@ -1542,7 +1654,7 @@ async function sseOnError() {
     sseSource = null
   }
   // High fix #5: start polling fallback immediately so live activity doesn't freeze
-  if (!poll) poll = setInterval(refresh, 900);
+  if (!poll) poll = setInterval(refresh, 3000);
   // Attempt SSE reconnect after 2s (only while agent is still running)
   setTimeout(async () => {
     if (running && !sseSource) {
@@ -1601,76 +1713,77 @@ async function send() {
 
   isSending = true;
 
-  await addMsg('User', text);
-  await updateInlineLive('Thinking...', 'running');
-  await setRunningState(true, false);
   setEditorText('');
+  setRunningState(true, false);
 
-  try {
-    sseSource = new EventSource('/api/stream/activity');
-    sseSource.onmessage = await sseOnMessage;
-    sseSource.onerror = await sseOnError;
-  } catch (ex) {
-    console.log('SSE not available, falling back to polling');
-    poll = setInterval(refresh, 900)
-  }
-  let postError = false;
-  try {
-    const runAbort = new AbortController();
-    const runTimeoutSeconds = Math.max(60, Number(uiRunTimeoutSeconds || 3600));
-    const runTimeout = setTimeout(() => runAbort.abort(), runTimeoutSeconds * 1000);
-    const r = await fetch('/api/run', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        prompt: text,
-        mode: intentMode,
-        features: mergedFeatures(),
-        conversation_id: window.currentConversationId
-      }),
-      signal: runAbort.signal
-    });
-    clearTimeout(runTimeout);
-    const data = await readJsonOrText(r);
-    if (!r.ok || data.ok === false) {
-      throw new Error(data.error || 'Request failed')
+  requestAnimationFrame(async () => {
+    addMsg('User', text);
+    updateInlineLive('Thinking...', 'running');
+
+    try {
+      sseSource = new EventSource('/api/stream/activity');
+      sseSource.onmessage = sseOnMessage;
+      sseSource.onerror = sseOnError;
+    } catch (ex) {
+      console.log('SSE not available, falling back to polling');
+      poll = setInterval(refresh, 900);
     }
-    // engine thread now alive — ensure stop button is visible
-    await setRunningState(true, false);
-    // POST returns immediately. Results delivered via SSE 'complete' event.
-  } catch (e) {
-    postError = true;
-    await updateInlineLive('Failed', 'failed');
-    if (e.name === 'AbortError' || e.message.includes('abort') || e.message.includes('cancel')) {
-      try {
-        const r_status = await fetch('/api/status?full=true');
-        const d_status = await r_status.json();
-        if (d_status.display_log && d_status.display_log.length > 0) {
-          await renderSession(d_status.display_log);
-        } else {
+    let postError = false;
+    try {
+      const runAbort = new AbortController();
+      const runTimeoutSeconds = Math.max(60, Number(uiRunTimeoutSeconds || 3600));
+      const runTimeout = setTimeout(() => runAbort.abort(), runTimeoutSeconds * 1000);
+      const r = await fetch('/api/run', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          prompt: text,
+          mode: intentMode,
+          features: mergedFeatures(),
+          conversation_id: window.currentConversationId
+        }),
+        signal: runAbort.signal
+      });
+      clearTimeout(runTimeout);
+      const data = await readJsonOrText(r);
+      if (!r.ok || data.ok === false) {
+        throw new Error(data.error || 'Request failed')
+      }
+      // engine thread now alive — ensure stop button is visible
+      await setRunningState(true, false);
+      // POST returns immediately. Results delivered via SSE 'complete' event.
+    } catch (e) {
+      postError = true;
+      await updateInlineLive('Failed', 'failed');
+      if (e.name === 'AbortError' || e.message.includes('abort') || e.message.includes('cancel')) {
+        try {
+          const r_status = await fetch('/api/status?full=true');
+          const d_status = await r_status.json();
+          if (d_status.display_log && d_status.display_log.length > 0) {
+            await renderSession(d_status.display_log);
+          } else {
+            await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
+          }
+        } catch (ex) {
           await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
         }
-      } catch (ex) {
+      } else {
         await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
       }
-    } else {
-      await addMsg('Agent', 'ERROR: ' + e.message + '\n\nDiagnostics and timeline export may have more detail.');
+    } finally {
+      if (postError) {
+        // Error path: do full cleanup immediately
+        if (sseSource) { sseSource.close(); sseSource = null }
+        clearInterval(poll); poll = null;
+        await setRunningState(false, false);
+        await compactLiveTranscript();
+      }
+      // Success path: SSE 'complete' handler handles cleanup & final refresh.
+      isSending = false;
     }
-  } finally {
-    if (postError) {
-      // Error path: do full cleanup immediately
-      if (sseSource) { sseSource.close(); sseSource = null }
-      clearInterval(poll); poll = null;
-      await setRunningState(false, false);
-      await compactLiveTranscript();
-    }
-    // Success path: SSE 'complete' handler handles cleanup.
-    isSending = false;
-    await refresh();
-    await conversationState.render();
-  }
+  });
 }
 
 async function stopRun() {
@@ -1846,6 +1959,9 @@ function addProviderUI(p, isPrimary) {
     <label class="config-label" style="margin-top: 8px;">API Key</label>
     <input type="password" class="config-input cfg-api-key" value="${esc(p.api_key || '')}" placeholder="sk-...">
     
+    <label class="config-label" style="margin-top: 8px;">Proxies (Comma-separated)</label>
+    <input type="text" class="config-input cfg-proxies" value="${esc(p.proxies || '')}" placeholder="http://proxy1.com,http://proxy2.com">
+    
     <div style="display:flex; gap:10px; margin-top: 8px;">
       <div style="flex:1;">
         <label class="config-label">Context Window</label>
@@ -1893,6 +2009,7 @@ function addProviderUI(p, isPrimary) {
           model: el.querySelector('.cfg-model').value,
           base_url: el.querySelector('.cfg-base-url').value,
           api_key: el.querySelector('.cfg-api-key').value,
+          proxies: el.querySelector('.cfg-proxies').value,
           disable_vision: el.querySelector('.cfg-disable-vision').checked,
           context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
           max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0
@@ -1950,6 +2067,7 @@ $('settingsSave').onclick = async () => {
       model: el.querySelector('.cfg-model').value,
       base_url: el.querySelector('.cfg-base-url').value,
       api_key: el.querySelector('.cfg-api-key').value,
+      proxies: el.querySelector('.cfg-proxies').value,
       disable_vision: el.querySelector('.cfg-disable-vision').checked,
       context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
       max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0,
@@ -2403,14 +2521,22 @@ function matchingDiffArtifactsForChangedFiles(changedFiles) {
     const art = diffArtifacts.find(a => {
       const title = String(a.title || '');
       const fallback = artifactFallbackPath(a);
-      return title === "Diff_" + bn + ".md" ||
+      if (title === "Diff_" + bn + ".md" ||
         title === "Diff_ " + bn + ".md" ||
         title === "Diff_" + bn ||
         title === "Diff_ " + bn ||
         title === "Diff: " + bn ||
         title === "Diff: " + bn + ".md" ||
         fallback === normalizedPath ||
-        fallback === bn;
+        fallback === bn) return true;
+
+      // Robust fallback: Check if the diff content actually targets this file
+      const content = String(a.content || '');
+      if (content.includes(`diff --git a/${normalizedPath} b/${normalizedPath}`)) return true;
+      if (content.includes(`+++ b/${normalizedPath}`)) return true;
+      if (content.includes(`+++ ${normalizedPath}`)) return true;
+
+      return false;
     });
     if (art && !relevant.includes(art)) relevant.push(art);
   });
@@ -2773,54 +2899,7 @@ $('artifactSaveBtn').onclick = async () => {
 setupTabs();
 
 
-function updateStickyPrompts() {
-  const chat = document.getElementById('chat');
-  if (!chat) return;
-  const chatRect = chat.getBoundingClientRect();
-  const prompts = document.querySelectorAll('.msg.user');
-
-  const scrollTop = chat.scrollTop;
-  let visiblePrompts = [];
-
-  prompts.forEach(p => {
-    const rect = p.getBoundingClientRect();
-
-    if (p.parentElement) {
-      const parent = p.parentElement;
-      // Get parent's offsetTop relative to chat container
-      let parentOffsetTop = 0;
-      let curr = parent;
-      while (curr && curr !== chat) {
-        parentOffsetTop += curr.offsetTop;
-        curr = curr.offsetParent;
-      }
-
-      const isSticking = scrollTop > (parentOffsetTop - 14);
-      const currentlySticking = p.classList.contains('sticking');
-
-      if (isSticking) {
-        if (!currentlySticking) {
-          const h = p.offsetHeight;
-          if (h > 0) {
-            p.style.setProperty('--natural-height', h + 'px');
-          }
-        }
-        p.classList.add('sticking');
-      } else {
-        p.classList.remove('sticking');
-        p.style.removeProperty('--natural-height');
-      }
-    }
-
-    if (rect.bottom > chatRect.top && rect.top < chatRect.bottom) {
-      visiblePrompts.push(p);
-    }
-  });
-
-
-}
-
-document.getElementById('chat').addEventListener('scroll', updateStickyPrompts);
+// Sticky prompts disabled for standard chat bubble layout
 
 document.addEventListener('click', e => {
   const btn = e.target.closest('.copy-btn');
