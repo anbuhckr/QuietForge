@@ -169,7 +169,7 @@ func clientFromCfg(cfg config.Config) *provider.Client {
 		if inst := buildProviderInstance(pid, key, base, mdl, dv, ""); inst != nil {
 			instances = append(instances, *inst)
 		}
-		
+
 		if pc.Proxies != nil && *pc.Proxies != "" {
 			for _, prx := range strings.Split(*pc.Proxies, ",") {
 				prx = strings.TrimSpace(prx)
@@ -810,7 +810,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.7")
+		fmt.Println("QuietForge v1.1.8")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1414,10 +1414,20 @@ func configToDict(cfg config.Config) map[string]any {
 		comp := make(map[string]any)
 		comp["auto"] = cfg.Compaction.Auto
 		comp["prune"] = cfg.Compaction.Prune
-		comp["tail_turns"] = float64(cfg.Compaction.TailTurns)
-		comp["preserve_recent_tokens"] = float64(cfg.Compaction.PreserveRecentTokens)
-		comp["reserved"] = float64(cfg.Compaction.Reserved)
-		comp["tool_truncation_limit"] = float64(cfg.Compaction.ToolTruncationLimit)
+		if primary, ok := cfg.Provider["primary"]; ok {
+			if primary.TailTurns != nil {
+				comp["tail_turns"] = float64(*primary.TailTurns)
+			}
+			if primary.PreserveRecentTokens != nil {
+				comp["preserve_recent_tokens"] = float64(*primary.PreserveRecentTokens)
+			}
+			if primary.Reserved != nil {
+				comp["reserved"] = float64(*primary.Reserved)
+			}
+			if primary.ToolTruncationLimit != nil {
+				comp["tool_truncation_limit"] = float64(*primary.ToolTruncationLimit)
+			}
+		}
 		if cfg.Compaction.Model != nil {
 			comp["model"] = *cfg.Compaction.Model
 		}
@@ -1791,10 +1801,14 @@ func setupConfigRoutes(api fiber.Router) {
 			APIKey        string  `json:"api_key"`
 			DisableVision bool    `json:"disable_vision"`
 			ContextWindow int     `json:"context_window"`
-			MaxMessages   int     `json:"max_messages"`
-			InputPrice    float64 `json:"input_price"`
-			OutputPrice   float64 `json:"output_price"`
-			Proxies       string  `json:"proxies"`
+			MaxMessages          int     `json:"max_messages"`
+			InputPrice           float64 `json:"input_price"`
+			OutputPrice          float64 `json:"output_price"`
+			Proxies              string  `json:"proxies"`
+			TailTurns            int     `json:"tail_turns"`
+			PreserveRecentTokens int     `json:"preserve_recent_tokens"`
+			Reserved             int     `json:"reserved"`
+			ToolTruncationLimit  int     `json:"tool_truncation_limit"`
 		}
 
 		providers := make([]providerInfo, 0)
@@ -1843,6 +1857,22 @@ func setupConfigRoutes(api fiber.Router) {
 			if pc.Proxies != nil {
 				prx = *pc.Proxies
 			}
+			tail := 0
+			if pc.TailTurns != nil {
+				tail = *pc.TailTurns
+			}
+			pres := 0
+			if pc.PreserveRecentTokens != nil {
+				pres = *pc.PreserveRecentTokens
+			}
+			res := 0
+			if pc.Reserved != nil {
+				res = *pc.Reserved
+			}
+			trunc := 0
+			if pc.ToolTruncationLimit != nil {
+				trunc = *pc.ToolTruncationLimit
+			}
 			providers = append(providers, providerInfo{
 				ID:            pid,
 				Model:         mdl,
@@ -1854,6 +1884,10 @@ func setupConfigRoutes(api fiber.Router) {
 				InputPrice:    inPrice,
 				OutputPrice:   outPrice,
 				Proxies:       prx,
+				TailTurns:            tail,
+				PreserveRecentTokens: pres,
+				Reserved:             res,
+				ToolTruncationLimit:  trunc,
 			})
 		}
 
@@ -1922,10 +1956,14 @@ func setupConfigRoutes(api fiber.Router) {
 			BaseURL       string  `json:"base_url"`
 			DisableVision bool    `json:"disable_vision"`
 			ContextWindow int     `json:"context_window"`
-			MaxMessages   int     `json:"max_messages"`
-			InputPrice    float64 `json:"input_price"`
-			OutputPrice   float64 `json:"output_price"`
-			Proxies       string  `json:"proxies"`
+			MaxMessages          int     `json:"max_messages"`
+			InputPrice           float64 `json:"input_price"`
+			OutputPrice          float64 `json:"output_price"`
+			Proxies              string  `json:"proxies"`
+			TailTurns            int     `json:"tail_turns"`
+			PreserveRecentTokens int     `json:"preserve_recent_tokens"`
+			Reserved             int     `json:"reserved"`
+			ToolTruncationLimit  int     `json:"tool_truncation_limit"`
 		}
 		payload := new(struct {
 			Providers   []provPayload `json:"providers"`
@@ -1993,6 +2031,27 @@ func setupConfigRoutes(api fiber.Router) {
 				} else {
 					delete(pCfg, "max_messages")
 				}
+				if p.TailTurns > 0 {
+					pCfg["tail_turns"] = p.TailTurns
+				} else {
+					delete(pCfg, "tail_turns")
+				}
+				if p.PreserveRecentTokens > 0 {
+					pCfg["preserve_recent_tokens"] = p.PreserveRecentTokens
+				} else {
+					delete(pCfg, "preserve_recent_tokens")
+				}
+				if p.Reserved > 0 {
+					pCfg["reserved"] = p.Reserved
+				} else {
+					delete(pCfg, "reserved")
+				}
+				if p.ToolTruncationLimit > 0 {
+					pCfg["tool_truncation_limit"] = p.ToolTruncationLimit
+				} else {
+					delete(pCfg, "tool_truncation_limit")
+				}
+
 				if p.InputPrice > 0 {
 					pCfg["input_price"] = p.InputPrice
 				} else {
@@ -2161,11 +2220,7 @@ func setupConfigRoutes(api fiber.Router) {
 		// Default values
 		return c.JSON(fiber.Map{
 			"auto":                   false,
-			"tail_turns":             10,
-			"preserve_recent_tokens": 1000,
-			"reserved":               2000,
 			"prune":                  false,
-			"tool_truncation_limit":  10000,
 		})
 	})
 
@@ -2182,11 +2237,7 @@ func setupConfigRoutes(api fiber.Router) {
 
 		compMap := map[string]any{
 			"auto":                   payload.Auto,
-			"tail_turns":             payload.TailTurns,
-			"preserve_recent_tokens": payload.PreserveRecentTokens,
-			"reserved":               payload.Reserved,
 			"prune":                  payload.Prune,
-			"tool_truncation_limit":  payload.ToolTruncationLimit,
 		}
 		if payload.Model != nil {
 			compMap["model"] = *payload.Model
@@ -3057,6 +3108,10 @@ func spawnSubagent(prompt, agentType string) (string, <-chan string, error) {
 	cfgDict["env"] = envMap
 
 	subSession := session.NewSession(newSessionID, sessionRepo, agentType, cfgDict, worktreePath)
+	if subSession.Metadata == nil {
+		subSession.Metadata = make(map[string]any)
+	}
+	subSession.Metadata["parent_session_id"] = activeConversation
 	if err := subSession.Save(); err != nil {
 		return "", nil, err
 	}
@@ -3091,6 +3146,62 @@ func spawnSubagent(prompt, agentType string) (string, <-chan string, error) {
 	}()
 
 	return newSessionID, doneChan, nil
+}
+
+func exportSubagentArtifacts(subagentWs string, mainWs string) {
+	if subagentWs == "" || mainWs == "" || subagentWs == mainWs {
+		return
+	}
+
+	// Export directly to the main workspace root so the main agent can easily find them
+	exportDir := mainWs
+
+	entries, err := os.ReadDir(subagentWs)
+	if err != nil {
+		log.Printf("Export: failed to read subagent workspace %s: %v", subagentWs, err)
+		return
+	}
+
+	const maxFileSize = 100 * 1024 * 1024 // 100 MB
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+
+		name := strings.ToLower(e.Name())
+		if strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") || strings.HasSuffix(name, ".webp") || strings.HasSuffix(name, ".pdf") {
+			srcPath := filepath.Join(subagentWs, e.Name())
+
+			info, err := os.Stat(srcPath)
+			if err != nil {
+				log.Printf("Export: failed to stat %s: %v", srcPath, err)
+				continue
+			}
+			if info.Size() > maxFileSize {
+				log.Printf("Export: skipping %s (%d bytes exceeds %d byte limit)", e.Name(), info.Size(), maxFileSize)
+				continue
+			}
+
+			dstPath := filepath.Join(exportDir, e.Name())
+			if _, err := os.Stat(dstPath); err == nil {
+				ext := filepath.Ext(e.Name())
+				base := strings.TrimSuffix(e.Name(), ext)
+				dstPath = filepath.Join(exportDir, base+"_"+subagentWs[len(subagentWs)-8:]+ext)
+			}
+
+			data, err := os.ReadFile(srcPath)
+			if err != nil {
+				log.Printf("Export: failed to read %s: %v", srcPath, err)
+				continue
+			}
+			if err := os.WriteFile(dstPath, data, 0644); err != nil {
+				log.Printf("Export: failed to write %s: %v", dstPath, err)
+				continue
+			}
+			log.Printf("Exported subagent artifact: %s -> %s", e.Name(), dstPath)
+		}
+	}
 }
 
 func runSubEngine(ctx context.Context, subSession *session.Session, message, agentID, workspace string, wm *util.WorktreeManager, branchName string) {
@@ -3136,6 +3247,8 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		subSession.Save()
 
 		if wm != nil && branchName != "" && workspace != os.Getenv("WORKSPACE_DIR") {
+			mcpManager.CleanupWorkspace(workspace)
+			exportSubagentArtifacts(workspace, os.Getenv("WORKSPACE_DIR"))
 			wm.Cleanup(branchName)
 		}
 	}()

@@ -294,8 +294,8 @@ func (r *Repository) ListTodos(sessionID string) ([]TodoRow, error) {
 
 func (r *Repository) DeleteSession(sessionID string) (bool, error) {
 	row := r.DB.Conn.QueryRow("SELECT id FROM sessions WHERE id = ?", sessionID)
-	var actualID string
-	if err := row.Scan(&actualID); err != nil {
+	var rootID string
+	if err := row.Scan(&rootID); err != nil {
 		return false, nil
 	}
 
@@ -305,18 +305,53 @@ func (r *Repository) DeleteSession(sessionID string) (bool, error) {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", actualID); err != nil {
+	// Find the session and all its descendant subagent sessions recursively
+	query := `
+		WITH RECURSIVE descendants(id, depth) AS (
+			VALUES(?, 0)
+			UNION
+			SELECT s.id, d.depth + 1 FROM sessions s, descendants d
+			WHERE json_extract(s.metadata, '$.parent_session_id') = d.id
+				AND d.depth < 50
+		)
+		SELECT id FROM descendants
+	`
+	rows, err := tx.Query(query, rootID)
+	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec("DELETE FROM messages WHERE session_id = ?", actualID); err != nil {
+	defer rows.Close()
+	var sessionIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return false, fmt.Errorf("failed to scan descendant session ID: %w", err)
+		}
+		sessionIDs = append(sessionIDs, id)
+	}
+	if err := rows.Err(); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec("DELETE FROM todos WHERE session_id = ?", actualID); err != nil {
-		return false, err
+
+	// Delete all associated data for the root and its descendants
+	for _, id := range sessionIDs {
+		if _, err := tx.Exec("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", id); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec("DELETE FROM messages WHERE session_id = ?", id); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec("DELETE FROM todos WHERE session_id = ?", id); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec("DELETE FROM display_log WHERE session_id = ?", id); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", id); err != nil {
+			return false, err
+		}
 	}
-	if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", actualID); err != nil {
-		return false, err
-	}
+
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}

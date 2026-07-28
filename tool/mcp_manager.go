@@ -378,7 +378,8 @@ func (m *McpManager) startMcpSession(ctx context.Context, srv McpServerDef, ws s
 }
 
 func (m *McpManager) callTool(ctx context.Context, serverName, toolName string, args map[string]any, ws string) (any, error) {
-	for {
+	const maxRetries = 5
+	for retry := 0; retry < maxRetries; retry++ {
 		m.mu.Lock()
 		srvDef, ok := m.servers[serverName]
 		session := m.sessions[serverName]
@@ -444,6 +445,7 @@ func (m *McpManager) callTool(ctx context.Context, serverName, toolName string, 
 		}
 		return result, nil
 	}
+	return nil, fmt.Errorf("server %s: max retries (%d) exceeded due to concurrent session replacement", serverName, maxRetries)
 }
 
 func (m *McpManager) runServer(ctx context.Context, srv McpServerDef) {
@@ -531,6 +533,21 @@ func (m *McpManager) Close() {
 	}
 	m.mu.Unlock()
 	m.wg.Wait()
+}
+
+func (m *McpManager) CleanupWorkspace(ws string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for srvName, activeWs := range m.sessionWs {
+		if activeWs == ws {
+			if s, ok := m.sessions[srvName]; ok {
+				log.Printf("MCP: Cleaning up session for %s in workspace %s", srvName, ws)
+				s.close()
+				delete(m.sessions, srvName)
+				delete(m.sessionWs, srvName)
+			}
+		}
+	}
 }
 
 func looksBinary(data []byte) bool {

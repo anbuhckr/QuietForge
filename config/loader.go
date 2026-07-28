@@ -149,6 +149,22 @@ func parseConfig(data map[string]any) Config {
 		if proxies, ok := pc["proxies"].(string); ok {
 			pConf.Proxies = &proxies
 		}
+		if tail, ok := pc["tail_turns"].(float64); ok {
+			tailInt := int(tail)
+			pConf.TailTurns = &tailInt
+		}
+		if preserve, ok := pc["preserve_recent_tokens"].(float64); ok {
+			preserveInt := int(preserve)
+			pConf.PreserveRecentTokens = &preserveInt
+		}
+		if reserved, ok := pc["reserved"].(float64); ok {
+			reservedInt := int(reserved)
+			pConf.Reserved = &reservedInt
+		}
+		if trunc, ok := pc["tool_truncation_limit"].(float64); ok {
+			truncInt := int(trunc)
+			pConf.ToolTruncationLimit = &truncInt
+		}
 		if opts, ok := pc["options"].(map[string]any); ok {
 			pConf.Options = opts
 		} else {
@@ -164,26 +180,10 @@ func parseConfig(data map[string]any) Config {
 		} else {
 			cc.Auto = true
 		}
-		if tail, ok := compactionRaw["tail_turns"].(float64); ok {
-			cc.TailTurns = int(tail)
-		} else {
-			cc.TailTurns = 2
-		}
-		if preserve, ok := compactionRaw["preserve_recent_tokens"].(float64); ok {
-			cc.PreserveRecentTokens = int(preserve)
-		}
-		if reserved, ok := compactionRaw["reserved"].(float64); ok {
-			cc.Reserved = int(reserved)
-		}
 		if prune, ok := compactionRaw["prune"].(bool); ok {
 			cc.Prune = prune
 		} else {
 			cc.Prune = true
-		}
-		if trunc, ok := compactionRaw["tool_truncation_limit"].(float64); ok {
-			cc.ToolTruncationLimit = int(trunc)
-		} else {
-			cc.ToolTruncationLimit = 2000
 		}
 		if modelStr, ok := compactionRaw["model"].(string); ok {
 			cc.Model = &modelStr
@@ -354,6 +354,18 @@ func configToDict(cfg Config) map[string]any {
 			if v.Proxies != nil {
 				pd["proxies"] = *v.Proxies
 			}
+			if v.TailTurns != nil {
+				pd["tail_turns"] = float64(*v.TailTurns)
+			}
+			if v.PreserveRecentTokens != nil {
+				pd["preserve_recent_tokens"] = float64(*v.PreserveRecentTokens)
+			}
+			if v.Reserved != nil {
+				pd["reserved"] = float64(*v.Reserved)
+			}
+			if v.ToolTruncationLimit != nil {
+				pd["tool_truncation_limit"] = float64(*v.ToolTruncationLimit)
+			}
 			pd["options"] = v.Options
 			providers[k] = pd
 		}
@@ -414,11 +426,7 @@ func configToDict(cfg Config) map[string]any {
 	if cfg.Compaction != nil {
 		comp := make(map[string]any)
 		comp["auto"] = cfg.Compaction.Auto
-		comp["tail_turns"] = float64(cfg.Compaction.TailTurns)
-		comp["preserve_recent_tokens"] = float64(cfg.Compaction.PreserveRecentTokens)
-		comp["reserved"] = float64(cfg.Compaction.Reserved)
 		comp["prune"] = cfg.Compaction.Prune
-		comp["tool_truncation_limit"] = float64(cfg.Compaction.ToolTruncationLimit)
 		if cfg.Compaction.Model != nil {
 			comp["model"] = *cfg.Compaction.Model
 		}

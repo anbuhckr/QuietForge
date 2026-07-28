@@ -132,6 +132,7 @@ func buildEnvSection(env map[string]string, workspace string) string {
 		"GITHUB_ACTIONS",
 		"GITPOD_WORKSPACE_ID",
 		"CODESPACES",
+		"SHARED_ARTIFACTS_DIR",
 	} {
 		if value, ok := env[key]; ok {
 			info = append(info, fmt.Sprintf("- %s: %s", key, value))

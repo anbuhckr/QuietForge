@@ -444,14 +444,28 @@ func stripVision(msgs []openai.ChatCompletionMessage) []openai.ChatCompletionMes
 	for _, m := range msgs {
 		newMsg := m
 		if len(m.MultiContent) > 0 {
-			newParts := make([]openai.ChatMessagePart, 0, len(m.MultiContent))
+			var textParts []string
 			for _, p := range m.MultiContent {
-				if p.Type == openai.ChatMessagePartTypeImageURL {
-					continue
+				if p.Type == openai.ChatMessagePartTypeText {
+					textParts = append(textParts, p.Text)
 				}
-				newParts = append(newParts, p)
 			}
-			newMsg.MultiContent = newParts
+			
+			if len(textParts) > 0 {
+				combined := strings.Join(textParts, "\n\n")
+				if newMsg.Content != "" {
+					newMsg.Content += "\n\n" + combined
+				} else {
+					newMsg.Content = combined
+				}
+			} else {
+				// MultiContent had only non-text parts (e.g. images). Use a placeholder
+				// instead of leaving Content empty, which would produce invalid messages.
+				if newMsg.Content == "" {
+					newMsg.Content = "[content removed: vision not supported]"
+				}
+			}
+			newMsg.MultiContent = nil
 		}
 		stripped = append(stripped, newMsg)
 	}

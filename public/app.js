@@ -4,10 +4,12 @@ window.viewArtifactByTitle = function (title) {
 };
 
 const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
   '&': '&amp;',
   '<': '&lt;',
-  '>': '&gt;'
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
 }[c]));
 const md = s => {
   if (!window.marked || !window.DOMPurify) return esc(s);
@@ -1975,6 +1977,28 @@ function addProviderUI(p, isPrimary) {
     
     <div style="display:flex; gap:10px; margin-top: 8px;">
       <div style="flex:1;">
+        <label class="config-label">Tail Turns</label>
+        <input type="number" class="config-input cfg-tail-turns" value="${p.tail_turns || 0}" placeholder="10">
+      </div>
+      <div style="flex:1;">
+        <label class="config-label">Preserve Recent Tokens</label>
+        <input type="number" class="config-input cfg-preserve-recent-tokens" value="${p.preserve_recent_tokens || 0}" placeholder="1000">
+      </div>
+    </div>
+    
+    <div style="display:flex; gap:10px; margin-top: 8px;">
+      <div style="flex:1;">
+        <label class="config-label">Reserved Tokens</label>
+        <input type="number" class="config-input cfg-reserved" value="${p.reserved || 0}" placeholder="2000">
+      </div>
+      <div style="flex:1;">
+        <label class="config-label">Tool Truncation Limit</label>
+        <input type="number" class="config-input cfg-tool-truncation-limit" value="${p.tool_truncation_limit || 0}" placeholder="10000">
+      </div>
+    </div>
+    
+    <div style="display:flex; gap:10px; margin-top: 8px;">
+      <div style="flex:1;">
         <label class="config-label">Price / 1M Input Tokens ($)</label>
         <input type="number" class="config-input cfg-input-price" value="${p.input_price || 0}" step="0.01" min="0" placeholder="Auto from catalog">
       </div>
@@ -2012,7 +2036,11 @@ function addProviderUI(p, isPrimary) {
           proxies: el.querySelector('.cfg-proxies').value,
           disable_vision: el.querySelector('.cfg-disable-vision').checked,
           context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
-          max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0
+          max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0,
+          tail_turns: parseInt(el.querySelector('.cfg-tail-turns').value) || 0,
+          preserve_recent_tokens: parseInt(el.querySelector('.cfg-preserve-recent-tokens').value) || 0,
+          reserved: parseInt(el.querySelector('.cfg-reserved').value) || 0,
+          tool_truncation_limit: parseInt(el.querySelector('.cfg-tool-truncation-limit').value) || 0
         };
       });
 
@@ -2072,7 +2100,11 @@ $('settingsSave').onclick = async () => {
       context_window: parseInt(el.querySelector('.cfg-context-window').value) || 0,
       max_messages: parseInt(el.querySelector('.cfg-max-messages').value) || 0,
       input_price: parseFloat(el.querySelector('.cfg-input-price')?.value) || 0,
-      output_price: parseFloat(el.querySelector('.cfg-output-price')?.value) || 0
+      output_price: parseFloat(el.querySelector('.cfg-output-price')?.value) || 0,
+      tail_turns: parseInt(el.querySelector('.cfg-tail-turns').value) || 0,
+      preserve_recent_tokens: parseInt(el.querySelector('.cfg-preserve-recent-tokens').value) || 0,
+      reserved: parseInt(el.querySelector('.cfg-reserved').value) || 0,
+      tool_truncation_limit: parseInt(el.querySelector('.cfg-tool-truncation-limit').value) || 0
     };
   });
   const p = {
@@ -2208,10 +2240,6 @@ async function openCompactionSettings() {
     const c = await r.json();
     if (c) {
       $('cfgCompactionAuto').checked = c.auto || false;
-      $('cfgCompactionTailTurns').value = c.tail_turns || 10;
-      $('cfgCompactionPreserveTokens').value = c.preserve_recent_tokens || 1000;
-      $('cfgCompactionReserved').value = c.reserved || 2000;
-      $('cfgCompactionTruncation').value = c.tool_truncation_limit || 10000;
       $('cfgCompactionPrune').checked = c.prune || false;
       $('cfgCompactionModel').value = c.model || '';
       $('cfgCompactionBaseURL').value = c.base_url || '';
@@ -2229,10 +2257,6 @@ $('compactionClose').onclick = () => $('compactionModal').classList.remove('open
 $('compactionSave').onclick = async () => {
   const payload = {
     auto: $('cfgCompactionAuto').checked,
-    tail_turns: parseInt($('cfgCompactionTailTurns').value) || 10,
-    preserve_recent_tokens: parseInt($('cfgCompactionPreserveTokens').value) || 1000,
-    reserved: parseInt($('cfgCompactionReserved').value) || 2000,
-    tool_truncation_limit: parseInt($('cfgCompactionTruncation').value) || 10000,
     prune: $('cfgCompactionPrune').checked,
     model: $('cfgCompactionModel').value.trim() || undefined,
     base_url: $('cfgCompactionBaseURL').value.trim() || undefined,
@@ -2936,7 +2960,7 @@ const explorerTree = document.getElementById('explorerTree');
 const workspaceActions = document.getElementById('workspaceActions');
 const explorerActions = document.getElementById('explorerActions');
 const explorerActionsBottom = document.getElementById('explorerActionsBottom');
-const btnEditExplorerItem = document.getElementById('editExplorerItem');
+const btnOpenExplorerItem = document.getElementById('openExplorerItem');
 const explorerListEl = document.getElementById('explorerList');
 const explorerBreadcrumbEl = document.getElementById('explorerBreadcrumb');
 const explorerBackBtn = document.getElementById('explorerBack');
@@ -2968,15 +2992,15 @@ if (tabWorkspaces && tabExplorer) {
   });
 }
 
-if (btnEditExplorerItem) {
-  btnEditExplorerItem.addEventListener('click', (e) => {
+if (btnOpenExplorerItem) {
+  btnOpenExplorerItem.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!explorerSelection) return alert('Select a file to edit');
+    if (!explorerSelection) return alert('Select a file to open');
     const el = document.querySelector('.explorer-item[data-path="' + CSS.escape(explorerSelection) + '"]');
     const isDir = el && el.getAttribute('data-type') === 'dir';
     if (isDir) {
-      alert('Cannot edit a directory. Please select a file.');
+      alert('Cannot open a directory. Please select a file.');
     } else {
       openWorkspaceFile(explorerSelection);
     }
