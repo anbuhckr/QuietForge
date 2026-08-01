@@ -128,3 +128,37 @@ func (m *SnapshotManager) RestoreFile(commitHash string, filePath string) bool {
 
 	return false
 }
+
+func (m *SnapshotManager) CleanUntracked(commitHash string) {
+	stdout, _, code := m.runGit("ls-tree", "-r", "--name-only", commitHash)
+	if code != 0 {
+		return
+	}
+	snapshotFiles := make(map[string]bool)
+	for _, f := range strings.Split(stdout, "\n") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			snapshotFiles[f] = true
+		}
+	}
+
+	stdoutTracked, _, code := m.runGit("ls-files")
+	if code != 0 {
+		return
+	}
+	stdoutUntracked, _, code := m.runGit("ls-files", "--others", "--exclude-standard")
+	if code != 0 {
+		return
+	}
+
+	currentFiles := append(strings.Split(stdoutTracked, "\n"), strings.Split(stdoutUntracked, "\n")...)
+	for _, f := range currentFiles {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !snapshotFiles[f] {
+			os.Remove(filepath.Join(m.Workspace, f))
+		}
+	}
+}

@@ -56,6 +56,8 @@ func (t *RevertTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResu
 		}, nil
 	}
 
+	snapManager.CleanUntracked(snapHash)
+
 	return &tool.ToolResult{
 		Title:  "Workspace Reverted",
 		Output: "Successfully reverted the entire workspace back to its original state! All changes made during this run have been erased. You can now try a completely different approach.",

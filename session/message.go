@@ -163,6 +163,28 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 			}
 		}
 
+		// 1.5 Remove tool messages that have no corresponding tool call
+		if msg.Role == "tool" {
+			found := false
+			for j := len(sanitized) - 1; j >= 0; j-- {
+				if sanitized[j].Role == "tool" {
+					continue
+				}
+				if sanitized[j].Role == "assistant" {
+					for _, tc := range sanitized[j].ToolCalls {
+						if tc.ID == msg.ToolCallID {
+							found = true
+							break
+						}
+					}
+				}
+				break // Stop looking once we hit a non-tool message
+			}
+			if !found {
+				continue // Drop dangling tool message
+			}
+		}
+
 		// 2. Merge consecutive assistant messages
 		if msg.Role == "assistant" && len(sanitized) > 0 && sanitized[len(sanitized)-1].Role == "assistant" {
 			prev := &sanitized[len(sanitized)-1]

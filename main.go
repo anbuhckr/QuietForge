@@ -810,7 +810,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.8")
+		fmt.Println("QuietForge v1.1.9")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1751,9 +1751,11 @@ func setupChatRoutes(api fiber.Router) {
 			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh the page."})
 		}
 		var targetMsg *session.Message
+		targetIdx := -1
 		displayLog, _ := activeSession.Repo.GetDisplayLog(activeSession.SessionID)
-		for _, entry := range displayLog {
+		for i, entry := range displayLog {
 			if id, ok := entry["id"].(string); ok && id == payload.MessageID {
+				targetIdx = i
 				targetMsg = &session.Message{ID: id}
 				if role, ok := entry["role"].(string); ok {
 					targetMsg.Role = role
@@ -1770,12 +1772,21 @@ func setupChatRoutes(api fiber.Router) {
 		if targetMsg == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "Message not found"})
 		}
-		snapRaw, ok := targetMsg.Metadata["snapshot"]
-		if !ok {
-			return c.Status(404).JSON(fiber.Map{"error": "No snapshot for this message"})
+		
+		// The snapshot is usually attached to the preceding user message
+		var snapHash string
+		for i := targetIdx; i >= 0; i-- {
+			if meta, ok := displayLog[i]["metadata"].(map[string]any); ok {
+				if snapRaw, ok := meta["snapshot"]; ok {
+					if hash, ok := snapRaw.(string); ok && hash != "" {
+						snapHash = hash
+						break
+					}
+				}
+			}
 		}
-		snapHash, ok := snapRaw.(string)
-		if !ok || snapHash == "" {
+
+		if snapHash == "" {
 			return c.Status(404).JSON(fiber.Map{"error": "No snapshot for this message"})
 		}
 		ws := activeSession.Workspace
@@ -1784,6 +1795,33 @@ func setupChatRoutes(api fiber.Router) {
 		}
 		sm := util.NewSnapshotManager(ws)
 		if sm.RestoreFile(snapHash, payload.Path) {
+			if targetMsg.Metadata != nil {
+				if runMeta, ok := targetMsg.Metadata["run_meta"].(map[string]any); ok {
+					if wsChanges, ok := runMeta["workspace_changes"].(map[string]any); ok {
+						var reverted []any
+						if raw, ok := wsChanges["reverted_files"].([]any); ok {
+							reverted = raw
+						} else if rawStr, ok := wsChanges["reverted_files"].([]string); ok {
+							for _, s := range rawStr {
+								reverted = append(reverted, s)
+							}
+						}
+						found := false
+						for _, r := range reverted {
+							if s, ok := r.(string); ok && s == payload.Path {
+								found = true
+								break
+							}
+						}
+						if !found {
+							reverted = append(reverted, payload.Path)
+							wsChanges["reverted_files"] = reverted
+							activeSession.Repo.UpdateMessageMetadata(targetMsg.ID, targetMsg.Metadata)
+							activeSession.Repo.UpdateDisplayMessageMetadata(targetMsg.ID, targetMsg.Metadata)
+						}
+					}
+				}
+			}
 			return c.JSON(fiber.Map{"ok": true})
 		}
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to revert file"})
@@ -3223,10 +3261,16 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 			wsChanges = createArtifacts(workspace, snapHash, agentModifiedFiles, nil)
 		}
 
+		var runArtifacts []map[string]any
+		if workspace != "" {
+			runArtifacts = getArtifactsForUI(workspace)
+		}
+
 		runMeta := map[string]any{
 			"live_events":       []map[string]any{},
 			"duration_ms":       durationMs,
 			"workspace_changes": wsChanges,
+			"artifacts":         runArtifacts,
 		}
 
 		msgs := subSession.GetHistory()
@@ -3701,10 +3745,15 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 				runEvents = append(runEvents, evt)
 			}
 		}
+		var runArtifacts []map[string]any
+		if workspace != "" {
+			runArtifacts = getArtifactsForUI(workspace)
+		}
 		runMeta := map[string]any{
 			"live_events":       runEvents,
 			"duration_ms":       durationMs,
 			"workspace_changes": wsChanges,
+			"artifacts":         runArtifacts,
 		}
 		if activeSession != nil {
 			for i := len(activeSession.Messages) - 1; i >= 0; i-- {
