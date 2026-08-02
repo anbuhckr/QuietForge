@@ -64,7 +64,7 @@ var BuiltinAgents = map[string]*AgentDefinition{
 		ID:                   AgentPlan,
 		Name:                 "Plan",
 		SystemPromptTemplate: "plan_system",
-		Tools: []string{"read", "grep", "glob", "shell", "webfetch", "websearch", "invoke_subagent", "question", "todowrite", "skill", "lsp", "ast_search", "revert_workspace", "mcp", "write_artifact", "invalid"},
+		Tools: []string{"read", "grep", "glob", "shell", "webfetch", "websearch", "invoke_subagent", "question", "todowrite", "skill", "lsp", "ast_search", "revert_workspace", "mcp", "write_artifact", "write", "edit", "apply_patch", "invalid"},
 		PermissionProfiles: map[string]string{
 			"read":        "allowed",
 			"grep":        "allowed",
@@ -80,6 +80,9 @@ var BuiltinAgents = map[string]*AgentDefinition{
 			"ast_search":  "allowed",
 			"mcp":         "allowed",
 			"write_artifact": "allowed",
+			"write":          "allowed",
+			"edit":           "allowed",
+			"apply_patch":    "allowed",
 			"invalid":        "allowed",
 		},
 	},

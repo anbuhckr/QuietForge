@@ -810,7 +810,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v1.1.9")
+		fmt.Println("QuietForge v2.0.0")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1772,7 +1772,7 @@ func setupChatRoutes(api fiber.Router) {
 		if targetMsg == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "Message not found"})
 		}
-		
+
 		// The snapshot is usually attached to the preceding user message
 		var snapHash string
 		for i := targetIdx; i >= 0; i-- {
@@ -1833,12 +1833,12 @@ func setupConfigRoutes(api fiber.Router) {
 		cfg := loadCfg()
 
 		type providerInfo struct {
-			ID            string  `json:"id"`
-			Model         string  `json:"model"`
-			BaseURL       string  `json:"base_url"`
-			APIKey        string  `json:"api_key"`
-			DisableVision bool    `json:"disable_vision"`
-			ContextWindow int     `json:"context_window"`
+			ID                   string  `json:"id"`
+			Model                string  `json:"model"`
+			BaseURL              string  `json:"base_url"`
+			APIKey               string  `json:"api_key"`
+			DisableVision        bool    `json:"disable_vision"`
+			ContextWindow        int     `json:"context_window"`
 			MaxMessages          int     `json:"max_messages"`
 			InputPrice           float64 `json:"input_price"`
 			OutputPrice          float64 `json:"output_price"`
@@ -1912,16 +1912,16 @@ func setupConfigRoutes(api fiber.Router) {
 				trunc = *pc.ToolTruncationLimit
 			}
 			providers = append(providers, providerInfo{
-				ID:            pid,
-				Model:         mdl,
-				BaseURL:       base,
-				APIKey:        masked,
-				DisableVision: dv,
-				ContextWindow: cw,
-				MaxMessages:   mm,
-				InputPrice:    inPrice,
-				OutputPrice:   outPrice,
-				Proxies:       prx,
+				ID:                   pid,
+				Model:                mdl,
+				BaseURL:              base,
+				APIKey:               masked,
+				DisableVision:        dv,
+				ContextWindow:        cw,
+				MaxMessages:          mm,
+				InputPrice:           inPrice,
+				OutputPrice:          outPrice,
+				Proxies:              prx,
 				TailTurns:            tail,
 				PreserveRecentTokens: pres,
 				Reserved:             res,
@@ -1988,12 +1988,12 @@ func setupConfigRoutes(api fiber.Router) {
 
 	api.Post("/config/llm", func(c *fiber.Ctx) error {
 		type provPayload struct {
-			ID            string  `json:"id"`
-			Model         string  `json:"model"`
-			APIKey        string  `json:"api_key"`
-			BaseURL       string  `json:"base_url"`
-			DisableVision bool    `json:"disable_vision"`
-			ContextWindow int     `json:"context_window"`
+			ID                   string  `json:"id"`
+			Model                string  `json:"model"`
+			APIKey               string  `json:"api_key"`
+			BaseURL              string  `json:"base_url"`
+			DisableVision        bool    `json:"disable_vision"`
+			ContextWindow        int     `json:"context_window"`
 			MaxMessages          int     `json:"max_messages"`
 			InputPrice           float64 `json:"input_price"`
 			OutputPrice          float64 `json:"output_price"`
@@ -2257,8 +2257,8 @@ func setupConfigRoutes(api fiber.Router) {
 		}
 		// Default values
 		return c.JSON(fiber.Map{
-			"auto":                   false,
-			"prune":                  false,
+			"auto":  false,
+			"prune": false,
 		})
 	})
 
@@ -2274,8 +2274,8 @@ func setupConfigRoutes(api fiber.Router) {
 		}
 
 		compMap := map[string]any{
-			"auto":                   payload.Auto,
-			"prune":                  payload.Prune,
+			"auto":  payload.Auto,
+			"prune": payload.Prune,
 		}
 		if payload.Model != nil {
 			compMap["model"] = *payload.Model
@@ -3162,7 +3162,16 @@ func spawnSubagent(prompt, agentType string) (string, <-chan string, error) {
 				sessionRepo.Close()
 			}
 		}()
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		bgProcessesMu.Lock()
+		bgProcesses[newSessionID] = cancel
+		bgProcessesMu.Unlock()
+		defer func() {
+			bgProcessesMu.Lock()
+			delete(bgProcesses, newSessionID)
+			bgProcessesMu.Unlock()
+			cancel()
+		}()
 		runSubEngine(ctx, subSession, prompt, agentType, worktreePath, wm, branchName)
 
 		report := "Subagent failed or returned no response."
@@ -4906,49 +4915,52 @@ func createArtifacts(workspace, snapHash string, agentModifiedFiles map[string]b
 			// Check if file is tracked, if so it means no changes, so do not create fake diff
 			cmdTracked := exec.Command("git", "ls-files", "--error-unmatch", relPath)
 			cmdTracked.Dir = workspace
-			if cmdTracked.Run() != nil {
-				// Untracked file. Try to extract its original content from snapHash
-				cmdShow := exec.Command("git", "show", fmt.Sprintf("%s:%s", snapHash, filepath.ToSlash(relPath)))
-				cmdShow.Dir = workspace
-				if showOut, showErr := cmdShow.Output(); showErr == nil {
-					// It existed in the snapshot! We can generate a perfect line-by-line diff
-					tmpFile, err := os.CreateTemp("", "qf-untracked-*")
-					if err == nil {
-						tmpFile.Write(showOut)
-						tmpFile.Close()
-						cmdDiff := exec.Command("git", "diff", "--ignore-cr-at-eol", "--ignore-space-at-eol", "--no-index", tmpFile.Name(), absPath)
-						diffOut, _ := cmdDiff.Output()
-						os.Remove(tmpFile.Name())
+			if cmdTracked.Run() == nil {
+				// Tracked file with no changes, skip it
+				continue
+			}
 
-						diffContent = strings.TrimSpace(string(diffOut))
-						if diffContent != "" {
-							lines := strings.Split(diffContent, "\n")
-							for i, line := range lines {
-								if strings.HasPrefix(line, "diff --git ") {
-									lines[i] = fmt.Sprintf("diff --git a/%s b/%s", relPath, relPath)
-								} else if strings.HasPrefix(line, "--- a/") || strings.HasPrefix(line, "--- \"a/") {
-									lines[i] = fmt.Sprintf("--- a/%s", relPath)
-								} else if strings.HasPrefix(line, "+++ b/") || strings.HasPrefix(line, "+++ \"b/") {
-									lines[i] = fmt.Sprintf("+++ b/%s", relPath)
-								}
-								if i >= 3 {
-									break
-								}
+			// Untracked file. Try to extract its original content from snapHash
+			cmdShow := exec.Command("git", "show", fmt.Sprintf("%s:%s", snapHash, filepath.ToSlash(relPath)))
+			cmdShow.Dir = workspace
+			if showOut, showErr := cmdShow.Output(); showErr == nil {
+				// It existed in the snapshot! We can generate a perfect line-by-line diff
+				tmpFile, err := os.CreateTemp("", "qf-untracked-*")
+				if err == nil {
+					tmpFile.Write(showOut)
+					tmpFile.Close()
+					cmdDiff := exec.Command("git", "diff", "--ignore-cr-at-eol", "--ignore-space-at-eol", "--no-index", tmpFile.Name(), absPath)
+					diffOut, _ := cmdDiff.Output()
+					os.Remove(tmpFile.Name())
+
+					diffContent = strings.TrimSpace(string(diffOut))
+					if diffContent != "" {
+						lines := strings.Split(diffContent, "\n")
+						for i, line := range lines {
+							if strings.HasPrefix(line, "diff --git ") {
+								lines[i] = fmt.Sprintf("diff --git a/%s b/%s", relPath, relPath)
+							} else if strings.HasPrefix(line, "--- a/") || strings.HasPrefix(line, "--- \"a/") {
+								lines[i] = fmt.Sprintf("--- a/%s", relPath)
+							} else if strings.HasPrefix(line, "+++ b/") || strings.HasPrefix(line, "+++ \"b/") {
+								lines[i] = fmt.Sprintf("+++ b/%s", relPath)
 							}
-							diffContent = strings.Join(lines, "\n")
+							if i >= 3 {
+								break
+							}
 						}
+						diffContent = strings.Join(lines, "\n")
 					}
 				}
-				if diffContent == "" {
-					info, sErr := os.Stat(absPath)
-					if sErr == nil && info.Size() < 100*1024 {
-						data, rErr := os.ReadFile(absPath)
-						if rErr == nil {
-							lines := strings.Split(string(data), "\n")
-							diffContent = fmt.Sprintf("--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%d @@\n", relPath, len(lines))
-							for _, line := range lines {
-								diffContent += "+" + line + "\n"
-							}
+			}
+			if diffContent == "" {
+				info, sErr := os.Stat(absPath)
+				if sErr == nil && info.Size() < 100*1024 {
+					data, rErr := os.ReadFile(absPath)
+					if rErr == nil {
+						lines := strings.Split(string(data), "\n")
+						diffContent = fmt.Sprintf("--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%d @@\n", relPath, len(lines))
+						for _, line := range lines {
+							diffContent += "+" + line + "\n"
 						}
 					}
 				}
@@ -4971,7 +4983,11 @@ func createArtifacts(workspace, snapHash string, agentModifiedFiles map[string]b
 				modified = append(modified, relPath)
 			}
 		} else {
-			created = append(created, relPath)
+			if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {
+				deleted = append(deleted, relPath)
+			} else {
+				created = append(created, relPath)
+			}
 		}
 	}
 
