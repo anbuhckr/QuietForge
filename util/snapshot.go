@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,7 @@ func (m *SnapshotManager) runGit(args ...string) (string, string, int) {
 	return stdout.String(), stderr.String(), code
 }
 
-func (m *SnapshotManager) Create(message string) *string {
+func (m *SnapshotManager) Create(message, refName string) *string {
 	if _, _, code := m.runGit("rev-parse", "--is-inside-work-tree"); code != 0 {
 		return nil
 	}
@@ -70,6 +71,11 @@ func (m *SnapshotManager) Create(message string) *string {
 
 	if err == nil {
 		hash := strings.TrimSpace(string(commitBytes))
+		
+		// Create the hidden ref
+		refPath := "refs/agent/" + refName
+		m.runGit("update-ref", refPath, hash)
+		
 		return &hash
 	}
 
@@ -103,15 +109,23 @@ func (m *SnapshotManager) Restore(commitHash string) bool {
 	return code == 0
 }
 
-func (m *SnapshotManager) RestoreFile(commitHash string, filePath string) bool {
+func (m *SnapshotManager) RestoreFile(preRef, postRef, filePath string, force bool) (bool, error) {
 	_, _, code := m.runGit("rev-parse", "--is-inside-work-tree")
 	if code != 0 {
-		return false
+		return false, nil
 	}
 
-	stdout, stderr, code := m.runGit("restore", "--source="+commitHash, "--worktree", filePath)
+	// Check if user manually modified it after the postRef
+	if postRef != "" && !force {
+		_, _, diffCode := m.runGit("diff", "--quiet", postRef, "--", filePath)
+		if diffCode != 0 { // 1 means changes exist
+			return false, fmt.Errorf("USER_EDITED")
+		}
+	}
+
+	stdout, stderr, code := m.runGit("restore", "--source="+preRef, "--worktree", filePath)
 	if code == 0 {
-		return true
+		return true, nil
 	}
 
 	// If restore failed because pathspec did not match, it means the file was created recently.
@@ -122,11 +136,11 @@ func (m *SnapshotManager) RestoreFile(commitHash string, filePath string) bool {
 		fullPath := filepath.Join(m.Workspace, filePath)
 		if _, err := os.Stat(fullPath); err == nil {
 			os.Remove(fullPath)
-			return true
+			return true, nil
 		}
 	}
 
-	return false
+	return false, nil
 }
 
 func (m *SnapshotManager) CleanUntracked(commitHash string) {

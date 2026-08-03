@@ -40,6 +40,10 @@ export function diffIconForPath(path) {
     label: ext.toUpperCase(),
     cls: 'js'
   };
+  if (ext === 'go') return {
+    label: 'GO',
+    cls: 'go'
+  };
   if (ext === 'py') return {
     label: 'PY',
     cls: 'py'
@@ -178,8 +182,16 @@ export function cleanDiffLines(content) {
     .filter(line => !line.startsWith('diff --git ') && !line.startsWith('index ') && !line.startsWith('--- ') && !line.startsWith('+++ '));
 }
 
-export function renderDiffWithLineNumbers(lines) {
+export function renderDiffWithLineNumbers(lines, filename = '') {
   let oldLine = 0, newLine = 0;
+  let lang = 'plaintext';
+  if (filename) {
+    const ext = filename.split('.').pop().toLowerCase();
+    const map = { js: 'javascript', ts: 'typescript', go: 'go', py: 'python', css: 'css', html: 'html', md: 'markdown', json: 'json', jsx: 'javascript', tsx: 'typescript' };
+    lang = map[ext] || ext;
+  }
+  const hasHljs = window.hljs && window.hljs.getLanguage(lang);
+
   return lines.map(line => {
     // Parse hunk header: @@ -oldStart,oldCount +newStart,newCount @@
     const hunkMatch = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
@@ -202,7 +214,13 @@ export function renderDiffWithLineNumbers(lines) {
       oldNum = oldLine++;
       newNum = newLine++;
     }
-    return `<div class="review-diff-line ${cls}"><span class="diff-ln">${oldNum}</span><span class="diff-ln">${newNum}</span><span class="diff-code">${esc(code || ' ')}</span></div>`;
+    let highlightedCode = esc(code || ' ');
+    if (hasHljs && code.trim().length > 0) {
+      try {
+        highlightedCode = window.hljs.highlight(code, { language: lang }).value;
+      } catch (e) {}
+    }
+    return `<div class="review-diff-line ${cls}"><span class="diff-ln">${oldNum}</span><span class="diff-ln">${newNum}</span><span class="diff-code hljs" style="display:inline; background:transparent; padding:0;">${highlightedCode}</span></div>`;
   }).join('');
 }
 
@@ -215,7 +233,7 @@ export function renderCombinedDiffReview(diffArtifacts, parsed) {
           <span class="review-file-path">${esc(file.path)}</span>
           <span class="review-file-counts"><span class="diff-widget-additions">+${file.additions}</span><span class="diff-widget-deletions">-${file.deletions}</span></span>
         </div>
-        <div class="review-diff-code">${renderDiffWithLineNumbers(lines)}</div>
+        <div class="review-diff-code">${renderDiffWithLineNumbers(lines, file.path)}</div>
       </section>
     `;
   }).join('');
@@ -252,15 +270,29 @@ export function renderPlainArtifactList(container, artifacts, title = 'Documents
   container.appendChild(group);
 }
 
-export function renderDiffReviewWidget(container, diffArtifacts, revertedFiles = []) {
-  const parsed = parseDiffArtifacts(diffArtifacts);
+export function renderDiffReviewWidget(container, workspaceChanges) {
+  let files = [];
+  if (workspaceChanges.created) files.push(...workspaceChanges.created);
+  if (workspaceChanges.modified) files.push(...workspaceChanges.modified);
+  if (workspaceChanges.deleted) files.push(...workspaceChanges.deleted);
+  files = [...new Set(files)]; // deduplicate
+  const revertedFiles = workspaceChanges.reverted_files || [];
+
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+  const fileStats = workspaceChanges.stats || {};
+  files.forEach(f => {
+    totalAdditions += (fileStats[f]?.additions || 0);
+    totalDeletions += (fileStats[f]?.deletions || 0);
+  });
+
   const widget = document.createElement('details');
   widget.className = 'diff-widget';
-  const filesText = parsed.files.length === 1 ? '1 file changed' : `${parsed.files.length} files changed`;
+  const filesText = files.length === 1 ? '1 file changed' : `${files.length} files changed`;
   widget.innerHTML = `
     <summary class="diff-widget-header" style="cursor: pointer; user-select: none;">
       <div class="diff-widget-stats" style="display: flex; align-items: center;">
-        <strong>${esc(filesText)}</strong><span class="diff-widget-additions">+${parsed.totalAdditions}</span><span class="diff-widget-deletions">-${parsed.totalDeletions}</span>
+        <strong>${esc(filesText)}</strong><span class="diff-widget-additions">+${totalAdditions}</span><span class="diff-widget-deletions">-${totalDeletions}</span>
         <span class="diff-widget-arrow" style="display:inline-block; margin-left:8px; font-family:monospace; font-size:11px; transform:rotate(0deg); transition:transform 0.2s;">></span>
       </div>
       <span class="diff-widget-review-btn">Review</span>
@@ -273,12 +305,12 @@ export function renderDiffReviewWidget(container, diffArtifacts, revertedFiles =
     if (arrow) arrow.style.transform = widget.open ? 'rotate(90deg)' : 'rotate(0deg)';
   });
   const list = widget.querySelector('.diff-widget-file-list');
-  parsed.files.forEach(file => {
-    const icon = diffIconForPath(file.path);
-    const filename = String(file.path).split(/[\\/]/).pop() || file.path;
-    const dir = String(file.path).slice(0, Math.max(0, String(file.path).length - filename.length));
+  files.forEach(path => {
+    const icon = diffIconForPath(path);
+    const filename = String(path).split(/[\\/]/).pop() || path;
+    const dir = String(path).slice(0, Math.max(0, String(path).length - filename.length));
     const row = document.createElement('button');
-    const isReverted = revertedFiles.includes(file.path);
+    const isReverted = revertedFiles.includes(path);
     row.className = 'diff-widget-file' + (isReverted ? ' reverted' : '');
     row.type = 'button';
     row.innerHTML = `
@@ -287,40 +319,64 @@ export function renderDiffReviewWidget(container, diffArtifacts, revertedFiles =
         <span class="diff-widget-filename">${esc(filename)}</span>
         ${dir ? `<span class="diff-widget-filepath">${esc(dir)}</span>` : ''}
       </span>
-      <span class="diff-widget-line-stats"><span class="diff-widget-additions">+${file.additions}</span><span class="diff-widget-deletions">-${file.deletions}</span></span>
+      <span class="diff-widget-line-stats"><span class="diff-widget-additions">+${fileStats[path]?.additions || 0}</span><span class="diff-widget-deletions">-${fileStats[path]?.deletions || 0}</span></span>
       ${isReverted ? '' : `
       <button type="button" class="diff-widget-revert-btn" title="Revert file to previous state">
         <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
       </button>
       `}
     `;
-    row.onclick = (e) => {
+    row.onclick = async (e) => {
+      const msgId = container.closest('.chat-turn')?.dataset?.messageId || (() => {
+        const msgs = document.querySelectorAll('.chat-turn[data-message-id]');
+        return msgs.length ? msgs[msgs.length - 1].dataset.messageId : null;
+      })();
+      if (!msgId) return alert('Cannot perform action: unknown message ID.');
+
       if (e.target.closest('.diff-widget-revert-btn')) {
         e.stopPropagation();
-        const msgId = container.closest('.chat-turn')?.dataset?.messageId || (() => {
-          const msgs = document.querySelectorAll('.chat-turn[data-message-id]');
-          return msgs.length ? msgs[msgs.length - 1].dataset.messageId : null;
-        })();
-        if (!msgId) return alert('Cannot revert: unknown message ID.');
-        showConfirm('Revert File', `Are you sure you want to revert "${file.path}" to its state before this AI response?`, async () => {
+        
+        const doRevert = async (force) => {
           try {
             const res = await fetch('/api/chat/revert-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message_id: msgId, path: file.path, conversation_id: window.currentConversationId })
+              body: JSON.stringify({ message_id: msgId, path: path, conversation_id: window.currentConversationId, force: force })
             });
             const data = await res.json();
-            if (data.error) throw new Error(data.error);
+            if (res.status === 409 && data.error === "USER_EDITED") {
+              showConfirm('Manual Edits Detected', `You have manually edited "${path}" since the AI modified it. Reverting will overwrite your edits. Are you sure?`, () => doRevert(true));
+              return;
+            }
+            if (!res.ok) throw new Error(data.error || 'Failed to revert');
             row.classList.add('reverted');
-            row.querySelector('.diff-widget-revert-btn').remove();
+            row.querySelector('.diff-widget-revert-btn')?.remove();
             if (window.refreshExplorerTree) window.refreshExplorerTree();
           } catch (err) {
             alert("Failed to revert file: " + err.message);
           }
-        });
+        };
+
+        showConfirm('Revert File', `Are you sure you want to revert "${path}" to its state before this AI response?`, () => doRevert(false));
         return;
       }
-      viewArtifact(reviewArtifactForFile(file));
+      
+      try {
+          const res = await fetch(`/api/chat/file-diff?path=${encodeURIComponent(path)}&message_id=${encodeURIComponent(msgId)}`);
+          if (!res.ok) throw new Error("Failed to fetch diff");
+          const diffContent = await res.text();
+          
+          const synthFile = {
+              path: path,
+              additions: fileStats[path]?.additions || 0,
+              deletions: fileStats[path]?.deletions || 0,
+              artifact: { content: diffContent }
+          };
+
+          window.viewArtifact(reviewArtifactForFile(synthFile));
+      } catch (err) {
+          alert("Error loading diff: " + err.message);
+      }
     };
     list.appendChild(row);
   });

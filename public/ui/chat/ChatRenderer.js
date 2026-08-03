@@ -342,14 +342,8 @@ export async function renderTurn(turnGroup, turn) {
       if (turn.workspaceChanges.modified) changedFiles.push(...turn.workspaceChanges.modified);
       if (changedFiles.length > 0) {
         if (!d.dataset.renderedDiffs) {
-          let relevantDiffs = turn.artifacts ? turn.artifacts : [];
-          if (relevantDiffs.length === 0 && window.latestArtifacts) {
-            relevantDiffs = matchingDiffArtifactsForChangedFiles(changedFiles);
-          }
-          if (relevantDiffs.length > 0) {
-            renderDiffReviewWidget(d, relevantDiffs, turn.workspaceChanges.reverted_files || []);
-            d.dataset.renderedDiffs = "true";
-          }
+          renderDiffReviewWidget(d, turn.workspaceChanges);
+          d.dataset.renderedDiffs = "true";
         }
       }
     }

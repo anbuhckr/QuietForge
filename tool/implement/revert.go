@@ -47,7 +47,7 @@ func (t *RevertTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResu
 	}
 
 	snapManager := util.NewSnapshotManager(ctx.Workspace)
-	success := snapManager.Restore(snapHash)
+	success := snapManager.Restore("refs/agent/" + snapHash)
 
 	if !success {
 		return &tool.ToolResult{
@@ -56,7 +56,7 @@ func (t *RevertTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.ToolResu
 		}, nil
 	}
 
-	snapManager.CleanUntracked(snapHash)
+	snapManager.CleanUntracked("refs/agent/" + snapHash)
 
 	return &tool.ToolResult{
 		Title:  "Workspace Reverted",

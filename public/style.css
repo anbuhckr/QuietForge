@@ -2996,6 +2996,10 @@ details:not([open]).diff-widget>.diff-widget-header {
   color: #f1e05a;
 }
 
+.diff-widget-file-icon.go {
+  color: #00add8;
+}
+
 .diff-widget-file-icon.py {
   color: #3572A5;
 }

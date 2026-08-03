@@ -810,7 +810,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v2.0.0")
+		fmt.Println("QuietForge v2.0.1")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -1740,16 +1740,22 @@ func setupChatRoutes(api fiber.Router) {
 			Path           string `json:"path"`
 			MessageID      string `json:"message_id"`
 			ConversationID string `json:"conversation_id"`
+			Force          bool   `json:"force"`
 		})
 		if err := c.BodyParser(payload); err != nil || payload.Path == "" || payload.MessageID == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "message_id and path are required"})
 		}
+		sessionMu.RLock()
 		if activeSession == nil {
+			sessionMu.RUnlock()
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 		}
 		if payload.ConversationID != "" && payload.ConversationID != activeSession.SessionID {
+			sessionMu.RUnlock()
 			return c.Status(400).JSON(fiber.Map{"error": "Session mismatch. Please refresh the page."})
 		}
+		sessionMu.RUnlock()
+
 		var targetMsg *session.Message
 		targetIdx := -1
 		displayLog, _ := activeSession.Repo.GetDisplayLog(activeSession.SessionID)
@@ -1794,7 +1800,14 @@ func setupChatRoutes(api fiber.Router) {
 			ws = workspaceDir
 		}
 		sm := util.NewSnapshotManager(ws)
-		if sm.RestoreFile(snapHash, payload.Path) {
+		postSnapHash := strings.Replace(snapHash, "pre-", "post-", 1)
+
+		ok, err := sm.RestoreFile("refs/agent/"+snapHash, "refs/agent/"+postSnapHash, payload.Path, payload.Force)
+		if err != nil && err.Error() == "USER_EDITED" {
+			return c.Status(409).JSON(fiber.Map{"error": "USER_EDITED"})
+		}
+
+		if ok {
 			if targetMsg.Metadata != nil {
 				if runMeta, ok := targetMsg.Metadata["run_meta"].(map[string]any); ok {
 					if wsChanges, ok := runMeta["workspace_changes"].(map[string]any); ok {
@@ -1825,6 +1838,82 @@ func setupChatRoutes(api fiber.Router) {
 			return c.JSON(fiber.Map{"ok": true})
 		}
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to revert file"})
+	})
+
+	api.Get("/chat/file-diff", func(c *fiber.Ctx) error {
+		path := c.Query("path")
+		msgID := c.Query("message_id")
+		if path == "" || msgID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "path and message_id required"})
+		}
+
+		sessionMu.RLock()
+		if activeSession == nil {
+			sessionMu.RUnlock()
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid session"})
+		}
+		displayLog, _ := activeSession.Repo.GetDisplayLog(activeSession.SessionID)
+		ws := activeSession.Workspace
+		sessionMu.RUnlock()
+
+		if ws == "" {
+			ws = workspaceDir
+		}
+
+		targetIdx := -1
+		for i, entry := range displayLog {
+			if id, ok := entry["id"].(string); ok && id == msgID {
+				targetIdx = i
+				break
+			}
+		}
+
+		var snapHash string
+		for i := targetIdx; i >= 0; i-- {
+			if meta, ok := displayLog[i]["metadata"].(map[string]any); ok {
+				if snapRaw, ok := meta["snapshot"]; ok {
+					if hash, ok := snapRaw.(string); ok && hash != "" {
+						snapHash = hash
+						break
+					}
+				}
+			}
+		}
+
+		if snapHash == "" {
+			return c.Status(404).JSON(fiber.Map{"error": "No snapshot found for this message"})
+		}
+
+		postSnapHash := strings.Replace(snapHash, "pre-", "post-", 1)
+
+		// Run diff using the pre and post refs
+		cmd := exec.Command("git", "diff", "refs/agent/"+snapHash, "refs/agent/"+postSnapHash, "--", path)
+		cmd.Dir = ws
+		out, err := cmd.Output()
+		if err != nil {
+			// fallback check if it was untracked newly created
+			cmdShow := exec.Command("git", "show", "refs/agent/"+postSnapHash+":"+filepath.ToSlash(path))
+			cmdShow.Dir = ws
+			if showOut, showErr := cmdShow.Output(); showErr == nil {
+				// File was newly created in postSnapHash
+				lines := strings.Split(string(showOut), "\n")
+				diffContent := fmt.Sprintf("--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%d @@\n", path, len(lines))
+				for _, line := range lines {
+					diffContent += "+" + line + "\n"
+				}
+				return c.SendString(diffContent)
+			}
+			return c.Status(500).SendString("Error fetching diff")
+		}
+
+		diffContent := string(out)
+		if diffContent == "" {
+			// fallback check if it was an untracked newly created file that wasn't tracked in post snap
+			// Actually postSnapHash is a commit of the working directory! ALL files in workspace are in postSnapHash!
+			// If diff is empty, maybe there's no diff.
+		}
+
+		return c.SendString(diffContent)
 	})
 }
 
@@ -3267,7 +3356,9 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		durationMs := time.Since(startTime).Milliseconds()
 		wsChanges := map[string]any{"created": []string{}, "modified": []string{}, "deleted": []string{}}
 		if snapHash != "" && workspace != "" {
-			wsChanges = createArtifacts(workspace, snapHash, agentModifiedFiles, nil)
+			postSnapHash := strings.Replace(snapHash, "pre-", "post-", 1)
+			createGitSnapshot(workspace, postSnapHash)
+			wsChanges = createArtifacts(workspace, snapHash, postSnapHash, agentModifiedFiles, nil)
 		}
 
 		var runArtifacts []map[string]any
@@ -3310,14 +3401,15 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 		debugLog("runSubEngine: load err=%v", err)
 	}
 
+	msgID := generateMsgID()
 	if workspace != "" {
-		if snapHash = createGitSnapshot(workspace); snapHash != "" {
+		if snapHash = createGitSnapshot(workspace, "pre-"+msgID); snapHash != "" {
 			debugLog("runSubEngine: git snapshot %s", snapHash)
 		}
 	}
 
 	userMsg := session.Message{
-		ID:        generateMsgID(),
+		ID:        msgID,
 		SessionID: subSession.SessionID,
 		Role:      "user",
 		CreatedAt: time.Now().UnixMilli(),
@@ -3557,7 +3649,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 
 						snapManager := util.NewSnapshotManager(workspace)
 						for _, f := range trackedFiles {
-							snapManager.RestoreFile(snapHash, f)
+							snapManager.RestoreFile("refs/agent/"+snapHash, "", f, true)
 						}
 					}
 				} else {
@@ -3646,7 +3738,7 @@ func runSubEngine(ctx context.Context, subSession *session.Session, message, age
 							// ZERO-TRUST ENGINE LOCK: Revert tracked changes instantly.
 							snapManager := util.NewSnapshotManager(workspace)
 							for _, f := range trackedFiles {
-								snapManager.RestoreFile(snapHash, f)
+								snapManager.RestoreFile("refs/agent/"+snapHash, "", f, true)
 							}
 
 							result.Error = "read_only_violation"
@@ -3741,7 +3833,9 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		wsChanges := map[string]any{"created": []string{}, "modified": []string{}, "deleted": []string{}}
 		// workspace and snapHash might not be captured if defer evaluates them late, but they are variables in the outer scope
 		if snapHash != "" && workspace != "" {
-			wsChanges = createArtifacts(workspace, snapHash, agentModifiedFiles, nil)
+			postSnapHash := strings.Replace(snapHash, "pre-", "post-", 1)
+			createGitSnapshot(workspace, postSnapHash)
+			wsChanges = createArtifacts(workspace, snapHash, postSnapHash, agentModifiedFiles, revertedFiles)
 		}
 		eventsMu.Lock()
 		liveSnap := make([]map[string]any, len(liveEvents))
@@ -3816,9 +3910,12 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	}
 	sessionMu.Unlock()
 
+	// Prepare User Message ID for snapshot
+	msgID := generateMsgID()
+
 	// Create git snapshot before run
 	if workspace != "" {
-		if snapHash = createGitSnapshot(workspace); snapHash != "" {
+		if snapHash = createGitSnapshot(workspace, "pre-"+msgID); snapHash != "" {
 			debugLog("runEngine: git snapshot %s", snapHash)
 		}
 	}
@@ -3884,7 +3981,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 	if enrichedMessage != "" {
 		userMsg := session.Message{
-			ID:        generateMsgID(),
+			ID:        msgID,
 			SessionID: activeSession.SessionID,
 			Role:      "user",
 			CreatedAt: time.Now().UnixMilli(),
@@ -4435,7 +4532,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 							if content, err := os.ReadFile(filepath.Join(workspace, f)); err == nil {
 								revertedFiles[f] = string(content)
 							}
-							snapManager.RestoreFile(snapHash, f)
+							snapManager.RestoreFile("refs/agent/"+snapHash, "", f, true)
 						}
 					}
 				} else {
@@ -4541,7 +4638,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 								if content, err := os.ReadFile(filepath.Join(workspace, f)); err == nil {
 									revertedFiles[f] = string(content)
 								}
-								snapManager.RestoreFile(snapHash, f)
+								snapManager.RestoreFile("refs/agent/"+snapHash, "", f, true)
 							}
 
 							result.Error = "read_only_violation"
@@ -4599,7 +4696,9 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 	// Detect changed files and create artifact diffs
 	workspaceChanges := map[string]any{"created": []string{}, "modified": []string{}, "deleted": []string{}}
 	if snapHash != "" && workspace != "" {
-		workspaceChanges = createArtifacts(workspace, snapHash, agentModifiedFiles, revertedFiles)
+		postSnapHash := strings.Replace(snapHash, "pre-", "post-", 1)
+		createGitSnapshot(workspace, postSnapHash)
+		workspaceChanges = createArtifacts(workspace, snapHash, postSnapHash, agentModifiedFiles, revertedFiles)
 		debugLog("runEngine: workspace changes: %+v", workspaceChanges)
 	}
 
@@ -4789,220 +4888,93 @@ func getArtifactsForUI(workspace string) []map[string]any {
 	return results
 }
 
-func createGitSnapshot(workspace string) string {
+func createGitSnapshot(workspace, refName string) string {
 	sm := util.NewSnapshotManager(workspace)
-	hashPtr := sm.Create("QuietForge Snapshot")
+	hashPtr := sm.Create("QuietForge Snapshot", refName)
 	if hashPtr != nil {
-		hash := *hashPtr
-		// Tag the commit to prevent Git GC from collecting it
-		tagCmd := exec.Command("git", "tag", "quietforge-"+hash, hash)
-		tagCmd.Dir = workspace
-		tagCmd.Run()
-		return hash
+		return refName
 	}
 	return ""
 }
 
-func createArtifacts(workspace, snapHash string, agentModifiedFiles map[string]bool, revertedFiles map[string]string) map[string]any {
-	debugLog("createArtifacts: workspace=%s snapHash=%s modCount=%d revCount=%d", workspace, snapHash, len(agentModifiedFiles), len(revertedFiles))
+func createArtifacts(workspace, preSnapHash, postSnapHash string, agentModifiedFiles map[string]bool, revertedFiles map[string]string) map[string]any {
+	debugLog("createArtifacts: workspace=%s preSnap=%s postSnap=%s modCount=%d revCount=%d", workspace, preSnapHash, postSnapHash, len(agentModifiedFiles), len(revertedFiles))
 	changes := map[string]any{"created": []string{}, "modified": []string{}, "deleted": []string{}}
 
-	// Get changed files via git diff
-	cmd := exec.Command("git", "diff", "--name-only", snapHash)
+	cmd := exec.Command("git", "diff", "--name-status", "refs/agent/"+preSnapHash, "refs/agent/"+postSnapHash)
 	cmd.Dir = workspace
 	out, err := cmd.Output()
 	if err != nil {
 		return changes
 	}
-	changedSet := map[string]bool{}
-	for _, f := range strings.Fields(string(out)) {
-		f = strings.TrimSpace(f)
-		if f != "" && agentModifiedFiles[filepath.ToSlash(f)] {
-			changedSet[f] = true
-		}
-	}
-
-	// Get untracked files
-	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
-	cmd.Dir = workspace
-	out, err = cmd.Output()
-	if err == nil {
-		for _, f := range strings.Fields(string(out)) {
-			f = strings.TrimSpace(f)
-			if f != "" && !changedSet[f] && agentModifiedFiles[filepath.ToSlash(f)] {
-				changedSet[f] = true
-			}
-		}
-	}
-
-	// Also explicitly include files that were modified by the agent but might have been entirely deleted
-	// (git diff catches deleted tracked files, but maybe not untracked deleted files)
-	for f := range agentModifiedFiles {
-		changedSet[f] = true
-	}
-
-	if len(changedSet) == 0 {
-		return changes
-	}
-
-	// Limit to 50 files
-	var changedFiles []string
-	for f := range changedSet {
-		changedFiles = append(changedFiles, f)
-	}
-	sort.Strings(changedFiles)
-	if len(changedFiles) > 50 {
-		changedFiles = changedFiles[:50]
-	}
-
-	artifactsDir := filepath.Join(workspace, ".agent", "artifacts")
-	os.MkdirAll(artifactsDir, 0755)
 
 	var created, modified, deleted []string
+	seen := make(map[string]bool)
 
-	for _, relPath := range changedFiles {
-		absPath := filepath.Join(workspace, relPath)
-
-		// Get git diff for this file
-		var dOut []byte
-		diffContent := ""
-
-		if revertedContent, ok := revertedFiles[relPath]; ok {
-			// File was reverted by read-only engine lock, so we diff against a temp file holding the agent's edits
-			tmpFile, err := os.CreateTemp("", "qf-reverted-*")
-			if err == nil {
-				tmpFile.WriteString(revertedContent)
-				tmpFile.Close()
-				cmd = exec.Command("git", "diff", "--ignore-cr-at-eol", "--ignore-space-at-eol", "--no-index", absPath, tmpFile.Name())
-				dOut, _ = cmd.Output()
-				os.Remove(tmpFile.Name())
-			}
-		} else {
-			cmd = exec.Command("git", "diff", "--ignore-cr-at-eol", "--ignore-space-at-eol", snapHash, "--", relPath)
-			cmd.Dir = workspace
-			dOut, _ = cmd.Output()
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 {
+			status := parts[0]
+			file := filepath.ToSlash(strings.TrimSpace(parts[1]))
 
-		if len(dOut) > 0 {
-			diffContent = strings.TrimSpace(string(dOut))
-
-			// Detect if git diff emitted a fake deletion patch for an untracked file that actually exists
-			if strings.Contains(diffContent, "\ndeleted file mode ") && fileExists(absPath) {
-				diffContent = ""
-			}
-
-			// Fix paths in --no-index output to match standard git diff
-			if revertedFiles[relPath] != "" && diffContent != "" {
-				lines := strings.Split(diffContent, "\n")
-				for i, line := range lines {
-					if strings.HasPrefix(line, "diff --git ") {
-						lines[i] = fmt.Sprintf("diff --git a/%s b/%s", relPath, relPath)
-					} else if strings.HasPrefix(line, "--- a/") || strings.HasPrefix(line, "--- \"a/") {
-						lines[i] = fmt.Sprintf("--- a/%s", relPath)
-					} else if strings.HasPrefix(line, "+++ b/") || strings.HasPrefix(line, "+++ \"b/") {
-						lines[i] = fmt.Sprintf("+++ b/%s", relPath)
-					}
-					if i >= 3 {
-						break
-					}
-				}
-				diffContent = strings.Join(lines, "\n")
-			}
-		}
-
-		// If no git diff but file exists, it's a new or modified untracked file
-		if diffContent == "" {
-			// Check if file is tracked, if so it means no changes, so do not create fake diff
-			cmdTracked := exec.Command("git", "ls-files", "--error-unmatch", relPath)
-			cmdTracked.Dir = workspace
-			if cmdTracked.Run() == nil {
-				// Tracked file with no changes, skip it
-				continue
-			}
-
-			// Untracked file. Try to extract its original content from snapHash
-			cmdShow := exec.Command("git", "show", fmt.Sprintf("%s:%s", snapHash, filepath.ToSlash(relPath)))
-			cmdShow.Dir = workspace
-			if showOut, showErr := cmdShow.Output(); showErr == nil {
-				// It existed in the snapshot! We can generate a perfect line-by-line diff
-				tmpFile, err := os.CreateTemp("", "qf-untracked-*")
-				if err == nil {
-					tmpFile.Write(showOut)
-					tmpFile.Close()
-					cmdDiff := exec.Command("git", "diff", "--ignore-cr-at-eol", "--ignore-space-at-eol", "--no-index", tmpFile.Name(), absPath)
-					diffOut, _ := cmdDiff.Output()
-					os.Remove(tmpFile.Name())
-
-					diffContent = strings.TrimSpace(string(diffOut))
-					if diffContent != "" {
-						lines := strings.Split(diffContent, "\n")
-						for i, line := range lines {
-							if strings.HasPrefix(line, "diff --git ") {
-								lines[i] = fmt.Sprintf("diff --git a/%s b/%s", relPath, relPath)
-							} else if strings.HasPrefix(line, "--- a/") || strings.HasPrefix(line, "--- \"a/") {
-								lines[i] = fmt.Sprintf("--- a/%s", relPath)
-							} else if strings.HasPrefix(line, "+++ b/") || strings.HasPrefix(line, "+++ \"b/") {
-								lines[i] = fmt.Sprintf("+++ b/%s", relPath)
-							}
-							if i >= 3 {
-								break
-							}
-						}
-						diffContent = strings.Join(lines, "\n")
-					}
-				}
-			}
-			if diffContent == "" {
-				info, sErr := os.Stat(absPath)
-				if sErr == nil && info.Size() < 100*1024 {
-					data, rErr := os.ReadFile(absPath)
-					if rErr == nil {
-						lines := strings.Split(string(data), "\n")
-						diffContent = fmt.Sprintf("--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%d @@\n", relPath, len(lines))
-						for _, line := range lines {
-							diffContent += "+" + line + "\n"
-						}
-					}
+			// Only include files that the agent modified
+			if agentModifiedFiles[file] {
+				seen[file] = true
+				if strings.HasPrefix(status, "A") {
+					created = append(created, file)
+				} else if strings.HasPrefix(status, "D") {
+					deleted = append(deleted, file)
+				} else {
+					modified = append(modified, file)
 				}
 			}
 		}
+	}
 
-		if diffContent != "" {
-			if len(diffContent) > 10000 {
-				diffContent = diffContent[:10000]
-			}
-			safeName := strings.NewReplacer("\\", "_", "/", "_", ":", "_").Replace(relPath)
-			artifactPath := filepath.Join(artifactsDir, "Diff_"+safeName+".md")
-			os.WriteFile(artifactPath, []byte("```diff\n"+diffContent+"\n```\n"), 0644)
-
-			if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {
-				deleted = append(deleted, relPath)
-			} else if strings.Contains(diffContent, "--- /dev/null") {
-				created = append(created, relPath)
-			} else {
-				modified = append(modified, relPath)
-			}
-		} else {
-			if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {
-				deleted = append(deleted, relPath)
-			} else {
-				created = append(created, relPath)
-			}
+	// Add reverted files explicitly since they won't appear in the pre/post diff
+	for file := range revertedFiles {
+		if !seen[file] {
+			modified = append(modified, file)
 		}
 	}
 
-	if created == nil {
-		created = []string{}
+	// Ensure slices aren't nil
+	if created == nil { created = []string{} }
+	if modified == nil { modified = []string{} }
+	if deleted == nil { deleted = []string{} }
+
+	// Calculate line additions/deletions using git diff --numstat
+	stats := make(map[string]map[string]int)
+	numstatCmd := exec.Command("git", "diff", "--numstat", "refs/agent/"+preSnapHash, "refs/agent/"+postSnapHash)
+	numstatCmd.Dir = workspace
+	numstatOut, err := numstatCmd.Output()
+	if err != nil {
+		debugLog("createArtifacts: numstat failed: %v", err)
 	}
-	if modified == nil {
-		modified = []string{}
+	
+	for _, line := range strings.Split(string(numstatOut), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) == 3 {
+			add, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+			del, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			file := filepath.ToSlash(strings.TrimSpace(parts[2]))
+			stats[file] = map[string]int{"additions": add, "deletions": del}
+		}
 	}
-	if deleted == nil {
-		deleted = []string{}
-	}
+
 	changes["created"] = created
 	changes["modified"] = modified
 	changes["deleted"] = deleted
+	changes["stats"] = stats
 	return changes
 }
 

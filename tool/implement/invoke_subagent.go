@@ -81,7 +81,12 @@ func (t *InvokeSubagentTool) Execute(args []byte, ctx *tool.ToolContext) (*tool.
 	}
 
 	for _, w := range waits {
-		report := <-w.ch
+		var report string
+		select {
+		case report = <-w.ch:
+		case <-ctx.Context.Done():
+			report = "Subagent execution was cancelled by the user."
+		}
 		results = append(results, fmt.Sprintf("=== Subagent %s (%s) Report ===\n%s", w.sessionID, w.agentType, report))
 	}
 
