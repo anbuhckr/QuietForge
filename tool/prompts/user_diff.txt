@@ -1,0 +1,1 @@
+Shows a git diff of the manual changes made by the user in the workspace since the agent last finished working. Use this ONLY when the user explicitly asks you to review or check what they have added/modified. You can optionally specify a file or directory path to diff.

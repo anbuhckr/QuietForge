@@ -1,0 +1,1 @@
+Shows a git diff of the changes made by the agent during the current session, ignoring any pre-existing uncommitted changes made by the user. Use this to verify exactly what you have modified without noise from the user's prior work. You can optionally specify a file or directory path to diff.

@@ -83,14 +83,14 @@ func getWorkspaceRepo(workspace string) (*storage.Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	repoCacheMu.Lock()
 	defer repoCacheMu.Unlock()
-	
+
 	if r, ok := repoCache[absPath]; ok {
 		return r, nil
 	}
-	
+
 	dbPath := filepath.Join(absPath, ".agent", "sessions.db")
 	if !fileExists(dbPath) {
 		util.EnsureDir(filepath.Join(absPath, ".agent"))
@@ -853,7 +853,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v2.0.2")
+		fmt.Println("QuietForge v2.0.3")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -872,7 +872,6 @@ func main() {
 		}
 	}
 	debugLog("main: db_path=%s", dbPath)
-
 
 	if err := util.InitWorkspacesRoot(); err != nil {
 		log.Fatalf("Failed to initialize workspaces root: %v", err)
@@ -1132,6 +1131,8 @@ func registerTools() {
 		&impl.AstSearchTool{},
 		&impl.SemanticSearchTool{},
 		&impl.RevertTool{},
+		&impl.WorkspaceDiffTool{},
+		&impl.UserDiffTool{},
 		&impl.PlanExitTool{},
 		&impl.DefineSubagentTool{},
 		&impl.WriteArtifactTool{},
@@ -4029,23 +4030,25 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		message = "Please proceed with the current goal."
 	}
 
-	enrichedMessage := message
-	if ctxOrchestrator != nil {
-		enrichedMessage = ctxOrchestrator.EnrichUserPrompt(message, workspace)
-	}
-
-	if enrichedMessage != "" {
+	if message != "" {
 		userMsg := session.Message{
 			ID:        msgID,
 			SessionID: activeSession.SessionID,
 			Role:      "user",
 			CreatedAt: time.Now().UnixMilli(),
-			Parts:     []session.MessagePart{{Type: "text", Content: enrichedMessage}},
+			Parts:     []session.MessagePart{{Type: "text", Content: message}},
 		}
 		if snapHash != "" {
 			userMsg.Metadata = map[string]any{"snapshot": snapHash}
 		}
 		activeSession.AddMessage(userMsg)
+		activeSession.Save()
+		addLiveEvent("activity", map[string]any{"event": "Thinking..."})
+	}
+
+	dynamicContext := ""
+	if ctxOrchestrator != nil {
+		dynamicContext = ctxOrchestrator.EnrichUserPrompt(message, workspace)
 	}
 
 	cfg := loadCfg()
@@ -4096,6 +4099,13 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			activeSession.AddMessage(followup)
 			activeSession.Save()
 			addLiveEvent("followup", map[string]any{"status": "processed"})
+
+			// Refresh dynamicContext for the follow-up message so the LLM gets context for the new intent
+			if ctxOrchestrator != nil {
+				if followCtx := ctxOrchestrator.EnrichUserPrompt(pendingMsg, workspace); followCtx != "" {
+					dynamicContext = followCtx
+				}
+			}
 		}
 
 		sysPrompt := systemPrompt
@@ -4128,6 +4138,9 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			}
 		}
 
+		isThinkModel := strings.Contains(strings.ToLower(mName), "qwythos") || strings.Contains(strings.ToLower(mName), "deepseek") || strings.Contains(strings.ToLower(mName), "r1")
+
+
 		if i == 0 {
 			originalCtxWindow = ctxWindow
 			// Allow frontend UI to fully establish SSE connection before we emit 'Compacting memory'
@@ -4136,7 +4149,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 		history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
 			addLiveEvent("activity", map[string]any{"event": state})
-		}, "")
+		}, dynamicContext)
 		oaMsgs := session.ToOpenAIMessages(history, false)
 		debugLog("runEngine: cycle %d prepared %d messages", i, len(oaMsgs))
 
@@ -4188,7 +4201,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 						}
 						// If the provider pre-filled <think> (e.g. Qwythos), the API stream omits it.
 						// We must inject it so the frontend can parse the thought block properly.
-						if len(cycleContent) == 0 && !hasReceivedReasoning && !strings.HasPrefix(evt.Text, "<think>") {
+						if isThinkModel && len(cycleContent) == 0 && !hasReceivedReasoning && !strings.HasPrefix(evt.Text, "<think>") {
 							cycleContent += "<think>\n"
 							fullContent += "<think>\n"
 							thoughtBuffer += "<think>\n"
@@ -4271,9 +4284,13 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			} else {
 				cycleContent = "<think>\n" + strings.TrimSpace(cycleContent) + "\n</think>\n"
 			}
-		} else if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
+		} else if isThinkModel && !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
 			// Fix DeepSeek R1 random <think> omissions
 			cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
+		}
+
+		if strings.Contains(cycleContent, "<think>") && !strings.Contains(cycleContent, "</think>") {
+			cycleContent += "\n</think>\n"
 		}
 
 		if cycleContent != originalCycleContent {
@@ -4311,7 +4328,12 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		default:
 		}
 
-		if cycleContent == "" && len(toolCalls) == 0 {
+		cleanCycle := strings.ReplaceAll(cycleContent, "<think>", "")
+		cleanCycle = strings.ReplaceAll(cleanCycle, "</think>", "")
+		cleanCycle = strings.ReplaceAll(cleanCycle, "[Thought process omitted for context limits]", "")
+
+		if strings.TrimSpace(cleanCycle) == "" && len(toolCalls) == 0 {
+			cycleContent = "" // Clear empty tags
 			// Stream produced nothing, fall back to non-streaming
 			debugLog("runEngine: cycle %d stream empty, falling back to Generate()", i)
 			resp, gErr := client.Generate(ctx, oaMsgs, toolDefs)
@@ -4330,7 +4352,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 					}
 					history := pm.PrepareMessages(ctx, agentID, ctxWindow, client, func(state string) {
 						addLiveEvent("activity", map[string]any{"event": state})
-					}, "")
+					}, dynamicContext)
 					oaMsgs = session.ToOpenAIMessages(history, false)
 					debugLog("runEngine: cycle %d reduced ctxWindow to %d, retrying", i, ctxWindow)
 					goto retryCycle
@@ -4385,7 +4407,7 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 			cycleContent = regexp.MustCompile(`(?is)<tool_calls>.*?</tool_calls>`).ReplaceAllString(cycleContent, "")
 
 			// Fix DeepSeek R1 random <think> omissions
-			if !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
+			if isThinkModel && !strings.Contains(cycleContent, "<think>") && len(cycleContent) > 0 {
 				cycleContent = "<think>\n[Thought process omitted for context limits]\n</think>\n" + cycleContent
 			}
 

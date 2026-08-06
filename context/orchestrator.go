@@ -68,10 +68,10 @@ func (o *Orchestrator) EnrichUserPrompt(rawPrompt string, workspace string) stri
 	ctxBlock := o.GatherContext(req)
 	
 	if ctxBlock == "" {
-		return rawPrompt
+		return ""
 	}
 	
-	return ctxBlock + "\n\n" + rawPrompt
+	return "<background_context>\n" + ctxBlock + "\n</background_context>"
 }
 
 func (o *Orchestrator) EnrichToolOutput(toolName string, output string, workspace string) string {
