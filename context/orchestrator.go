@@ -5,23 +5,23 @@ import (
 )
 
 type Orchestrator struct {
-	Repo      *storage.Repository
-	Cache     *WorkingSetCache
-	Builder   *PromptBuilder
-	Providers []ContextProvider
+	Cache        *WorkingSetCache
+	Builder      *PromptBuilder
+	Providers    []ContextProvider
+	RepoResolver func(workspace string) (*storage.Repository, error)
 }
 
-func NewOrchestrator(repo *storage.Repository) *Orchestrator {
+func NewOrchestrator(resolver func(workspace string) (*storage.Repository, error)) *Orchestrator {
 	o := &Orchestrator{
-		Repo:    repo,
-		Cache:   NewWorkingSetCache(),
-		Builder: NewPromptBuilder(2000), // Global token budget
-		Providers: []ContextProvider{}, 
+		Cache:        NewWorkingSetCache(),
+		Builder:      NewPromptBuilder(2000), // Global token budget
+		Providers:    []ContextProvider{},
+		RepoResolver: resolver,
 	}
-	o.AddProvider(&ArchitectureProvider{Repo: repo})
-	o.AddProvider(&TaskProvider{Repo: repo})
-	o.AddProvider(&RetrievalProvider{Repo: repo})
-	o.AddProvider(&DiagnosticProvider{Repo: repo})
+	o.AddProvider(&ArchitectureProvider{})
+	o.AddProvider(&TaskProvider{})
+	o.AddProvider(&RetrievalProvider{})
+	o.AddProvider(&DiagnosticProvider{})
 	return o
 }
 
@@ -61,8 +61,9 @@ func (o *Orchestrator) GetGlobalArchitecture(workspace string) string {
 
 func (o *Orchestrator) EnrichUserPrompt(rawPrompt string, workspace string) string {
 	req := ContextRequest{
-		Workspace: workspace,
-		Prompt:    rawPrompt,
+		Workspace:    workspace,
+		Prompt:       rawPrompt,
+		RepoResolver: o.RepoResolver,
 	}
 	ctxBlock := o.GatherContext(req)
 	
@@ -75,9 +76,10 @@ func (o *Orchestrator) EnrichUserPrompt(rawPrompt string, workspace string) stri
 
 func (o *Orchestrator) EnrichToolOutput(toolName string, output string, workspace string) string {
 	req := ContextRequest{
-		Workspace: workspace,
-		ToolName:  toolName,
-		Output:    output,
+		Workspace:    workspace,
+		ToolName:     toolName,
+		Output:       output,
+		RepoResolver: o.RepoResolver,
 	}
 	ctxBlock := o.GatherContext(req)
 	

@@ -2,11 +2,10 @@ package context
 
 import (
 	"fmt"
-	"quietforge/storage"
+	
 )
 
 type ArchitectureProvider struct {
-	Repo *storage.Repository
 }
 
 func (p *ArchitectureProvider) ID() string {
@@ -21,12 +20,16 @@ func (p *ArchitectureProvider) Gather(req ContextRequest) ([]ContextFragment, er
 	if req.Workspace == "" {
 		return nil, nil
 	}
+	repo, err := req.RepoResolver(req.Workspace)
+	if err != nil || repo == nil {
+		return nil, err
+	}
 
-	decisions, err := p.Repo.ListArchitecture(req.Workspace, "decision")
+	decisions, err := repo.ListArchitecture(req.Workspace, "decision")
 	if err != nil {
 		return nil, err
 	}
-	constraints, err := p.Repo.ListArchitecture(req.Workspace, "constraint")
+	constraints, err := repo.ListArchitecture(req.Workspace, "constraint")
 	if err != nil {
 		return nil, err
 	}

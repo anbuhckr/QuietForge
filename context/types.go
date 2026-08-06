@@ -1,12 +1,17 @@
 package context
 
+import (
+	"quietforge/storage"
+)
+
 type ContextRequest struct {
-	Workspace string
-	SessionID string
-	Prompt    string
-	Intent    string
-	ToolName  string // e.g. "shell" (for diagnostic requests)
-	Output    string // Raw tool output
+	Workspace    string
+	SessionID    string
+	Prompt       string
+	Intent       string
+	ToolName     string // e.g. "shell" (for diagnostic requests)
+	Output       string // Raw tool output
+	RepoResolver func(workspace string) (*storage.Repository, error)
 }
 
 type ContextFragment struct {

@@ -2,11 +2,10 @@ package context
 
 import (
 	"fmt"
-	"quietforge/storage"
+	
 )
 
 type TaskProvider struct {
-	Repo *storage.Repository
 }
 
 func (p *TaskProvider) ID() string {
@@ -18,11 +17,15 @@ func (p *TaskProvider) SoftLimit() int {
 }
 
 func (p *TaskProvider) Gather(req ContextRequest) ([]ContextFragment, error) {
-	if req.SessionID == "" {
+	if req.SessionID == "" || req.Workspace == "" {
 		return nil, nil
 	}
+	repo, err := req.RepoResolver(req.Workspace)
+	if err != nil || repo == nil {
+		return nil, err
+	}
 
-	rows, err := p.Repo.DB.Conn.Query("SELECT id, content FROM todos WHERE session_id = ? AND status = 'pending'", req.SessionID)
+	rows, err := repo.DB.Conn.Query("SELECT id, content FROM todos WHERE session_id = ? AND status = 'pending'", req.SessionID)
 	if err != nil {
 		return nil, err
 	}

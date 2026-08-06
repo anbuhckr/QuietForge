@@ -553,7 +553,7 @@ func (r *Repository) SyncWorkspaceFacts(workspace string, path string, hash stri
 	// 3. Insert new symbols
 	for _, sym := range symbols {
 		_, err = tx.Exec(`
-			INSERT INTO workspace_symbols (id, workspace, path, name, type, line_start, line_end, updated_at)
+			INSERT OR REPLACE INTO workspace_symbols (id, workspace, path, name, type, line_start, line_end, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		`, sym.ID, sym.Workspace, sym.Path, sym.Name, sym.Type, sym.LineStart, sym.LineEnd, sym.UpdatedAt)
 		if err != nil {
@@ -564,7 +564,7 @@ func (r *Repository) SyncWorkspaceFacts(workspace string, path string, hash stri
 	// 4. Insert new edges
 	for _, edge := range edges {
 		_, err = tx.Exec(`
-			INSERT INTO workspace_edges (id, workspace, source_path, target_path, edge_type)
+			INSERT OR REPLACE INTO workspace_edges (id, workspace, source_path, target_path, edge_type)
 			VALUES (?, ?, ?, ?, ?)
 		`, edge.ID, edge.Workspace, edge.SourcePath, edge.TargetPath, edge.EdgeType)
 		if err != nil {

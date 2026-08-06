@@ -13,7 +13,11 @@ import (
 )
 
 func UpdateFile(repo *storage.Repository, workspace, path string) error {
-	data, err := os.ReadFile(path)
+	fullPath := path
+	if !filepath.IsAbs(path) {
+		fullPath = filepath.Join(workspace, path)
+	}
+	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		return err
 	}

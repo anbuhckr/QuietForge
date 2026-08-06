@@ -2,11 +2,10 @@ package context
 
 import (
 	"fmt"
-	"quietforge/storage"
+	
 )
 
 type DiagnosticProvider struct {
-	Repo *storage.Repository
 }
 
 func (p *DiagnosticProvider) ID() string {
@@ -21,9 +20,13 @@ func (p *DiagnosticProvider) Gather(req ContextRequest) ([]ContextFragment, erro
 	if req.Workspace == "" {
 		return nil, nil
 	}
+	repo, err := req.RepoResolver(req.Workspace)
+	if err != nil || repo == nil {
+		return nil, err
+	}
 
 	// We don't parse raw text anymore. We query the DB for active errors.
-	rows, err := p.Repo.DB.Conn.Query(`
+	rows, err := repo.DB.Conn.Query(`
 		SELECT symbol, COUNT(*) as fail_count, MAX(message) as latest_err 
 		FROM workspace_diagnostics 
 		WHERE workspace = ? AND status = 'active' AND symbol IS NOT NULL

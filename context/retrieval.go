@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"quietforge/config"
-	"quietforge/storage"
+	
 	"quietforge/util"
 	"quietforge/workspace"
 )
@@ -26,7 +26,6 @@ func dotProduct(a, b []float32) float32 {
 }
 
 type RetrievalProvider struct {
-	Repo *storage.Repository
 }
 
 func (p *RetrievalProvider) ID() string {
@@ -68,6 +67,10 @@ func (p *RetrievalProvider) Gather(req ContextRequest) ([]ContextFragment, error
 	if req.Workspace == "" || req.Prompt == "" {
 		return nil, nil
 	}
+	repo, err := req.RepoResolver(req.Workspace)
+	if err != nil || repo == nil {
+		return nil, err
+	}
 
 	var fragments []ContextFragment
 	seen := make(map[string]bool)
@@ -75,7 +78,7 @@ func (p *RetrievalProvider) Gather(req ContextRequest) ([]ContextFragment, error
 	lowerPrompt := strings.ToLower(req.Prompt)
 
 	// 1. BM25 / Substring Search (Fast, exact matches)
-	symRows, err := p.Repo.DB.Conn.Query("SELECT id, name, type, path, line_start, line_end FROM workspace_symbols WHERE workspace = ?", req.Workspace)
+	symRows, err := repo.DB.Conn.Query("SELECT id, name, type, path, line_start, line_end FROM workspace_symbols WHERE workspace = ?", req.Workspace)
 	if err == nil {
 		for symRows.Next() {
 			var id, name, typ, path string
@@ -154,10 +157,11 @@ func (p *RetrievalProvider) Gather(req ContextRequest) ([]ContextFragment, error
 				}
 
 				if filePath != "" {
-					var sID string
-					row := p.Repo.DB.Conn.QueryRow("SELECT id, line_start, line_end FROM workspace_symbols WHERE workspace = ? AND path = ? AND name = ?", req.Workspace, filePath, symbolName)
-					if err := row.Scan(&sID, &lineStart, &lineEnd); err == nil {
-						fragID = fmt.Sprintf("sym:%s", sID)
+					var symID string
+					var lineStart, lineEnd int
+					row := repo.DB.Conn.QueryRow("SELECT id, line_start, line_end FROM workspace_symbols WHERE workspace = ? AND path = ? AND name = ?", req.Workspace, filePath, symbolName)
+					if err := row.Scan(&symID, &lineStart, &lineEnd); err == nil {
+						fragID = fmt.Sprintf("sym:%s", symID)
 					}
 				}
 

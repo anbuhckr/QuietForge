@@ -70,9 +70,52 @@ var (
 	appCfg           config.Config
 	workspaceDir     string
 	needsFullRefresh bool
-	db               *storage.Database
-	repo             *storage.Repository
+
+	repoCache   = make(map[string]*storage.Repository)
+	repoCacheMu sync.Mutex
 )
+
+func getWorkspaceRepo(workspace string) (*storage.Repository, error) {
+	if workspace == "" {
+		return nil, fmt.Errorf("workspace is required")
+	}
+	absPath, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil, err
+	}
+	
+	repoCacheMu.Lock()
+	defer repoCacheMu.Unlock()
+	
+	if r, ok := repoCache[absPath]; ok {
+		return r, nil
+	}
+	
+	dbPath := filepath.Join(absPath, ".agent", "sessions.db")
+	if !fileExists(dbPath) {
+		util.EnsureDir(filepath.Join(absPath, ".agent"))
+	}
+	d, err := storage.NewDatabase(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open workspace DB for %s: %v", absPath, err)
+	}
+	r := storage.NewRepository(d)
+	repoCache[absPath] = r
+	return r, nil
+}
+
+func removeWorkspaceRepo(workspace string) {
+	absPath, err := filepath.Abs(workspace)
+	if err != nil {
+		return
+	}
+	repoCacheMu.Lock()
+	defer repoCacheMu.Unlock()
+	if r, ok := repoCache[absPath]; ok {
+		r.Close()
+		delete(repoCache, absPath)
+	}
+}
 
 const (
 	maxEngineCycles        = 150
@@ -810,7 +853,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v2.0.1")
+		fmt.Println("QuietForge v2.0.2")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -830,21 +873,14 @@ func main() {
 	}
 	debugLog("main: db_path=%s", dbPath)
 
-	var err error
+
 	if err := util.InitWorkspacesRoot(); err != nil {
 		log.Fatalf("Failed to initialize workspaces root: %v", err)
 	}
 
-	db, err = storage.NewDatabase(dbPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Close()
-
-	repo = storage.NewRepository(db)
-	workspaceObserver = wspkg.NewObserver(repo, 3) // 3 concurrent workers
+	workspaceObserver = wspkg.NewObserver(getWorkspaceRepo, 3) // 3 concurrent workers
 	defer workspaceObserver.Stop()
-	ctxOrchestrator = qctx.NewOrchestrator(repo)
+	ctxOrchestrator = qctx.NewOrchestrator(getWorkspaceRepo)
 	if ctxOrchestrator != nil {
 		ctxOrchestrator.AddProvider(qctx.NewExecutionProvider(workspaceDir, appCfg))
 	}
@@ -1592,6 +1628,15 @@ func setupChatRoutes(api fiber.Router) {
 			}
 			r := storage.NewRepository(d)
 			debugLog("/chat/delete: deleting from project %s", p.Path)
+			if msgs, err := r.GetMessages(convID); err == nil && len(msgs) > 0 {
+				var sb strings.Builder
+				for _, msg := range msgs {
+					sb.WriteString(fmt.Sprintf("delete refs/agent/pre-%s\ndelete refs/agent/post-%s\n", msg.ID, msg.ID))
+				}
+				cmd := exec.Command("git", "-C", p.Path, "update-ref", "--stdin")
+				cmd.Stdin = strings.NewReader(sb.String())
+				cmd.Run()
+			}
 			if _, err := r.DeleteSession(convID); err != nil {
 				log.Printf("/chat/delete: failed to delete session %s from %s: %v", convID, p.Path, err)
 			}
@@ -1688,7 +1733,11 @@ func setupChatRoutes(api fiber.Router) {
 
 		if snapHash != "" {
 			sm := util.NewSnapshotManager(ws)
-			if !sm.Restore(snapHash) {
+			ref := snapHash
+			if strings.HasPrefix(snapHash, "pre-msg-") || strings.HasPrefix(snapHash, "post-msg-") {
+				ref = "refs/agent/" + snapHash
+			}
+			if !sm.Restore(ref) {
 				return c.Status(500).JSON(fiber.Map{"error": "Failed to restore workspace"})
 			}
 		}
@@ -1723,6 +1772,9 @@ func setupChatRoutes(api fiber.Router) {
 							tagDel := exec.Command("git", "tag", "-d", "quietforge-"+snapHash)
 							tagDel.Dir = ws
 							tagDel.Run()
+							refDel := exec.Command("git", "update-ref", "-d", "refs/agent/"+snapHash)
+							refDel.Dir = ws
+							refDel.Run()
 						}
 					}
 				}
@@ -2543,10 +2595,9 @@ func setupProjectRoutes(api fiber.Router) {
 		var warning string
 
 		// Close workspace DB before deleting .agent to avoid lock on Windows
+		removeWorkspaceRepo(payload.Path)
+
 		if workspaceDir != "" && isAbsPathEqual(workspaceDir, payload.Path) {
-			if activeSession != nil && activeSession.Repo != nil {
-				activeSession.Repo.Close()
-			}
 			activeSession = nil
 			workspaceDir = ""
 			os.Unsetenv("WORKSPACE_DIR")
@@ -2557,6 +2608,19 @@ func setupProjectRoutes(api fiber.Router) {
 		}
 
 		absPath, _ := filepath.Abs(payload.Path)
+
+		// Clean up git refs/agent namespace
+		cmd := exec.Command("git", "for-each-ref", "--format=%(refname)", "refs/agent/")
+		cmd.Dir = absPath
+		if out, err := cmd.Output(); err == nil {
+			refs := strings.Split(strings.TrimSpace(string(out)), "\n")
+			for _, ref := range refs {
+				if ref = strings.TrimSpace(ref); ref != "" {
+					exec.Command("git", "-C", absPath, "update-ref", "-d", ref).Run()
+				}
+			}
+		}
+
 		agentDir := filepath.Join(absPath, ".agent")
 		if info, err := os.Stat(agentDir); err == nil && info.IsDir() {
 			if err := os.RemoveAll(agentDir); err != nil {
@@ -2718,6 +2782,9 @@ func setupWorkspaceRoutes(api fiber.Router) {
 		}
 		if err := os.WriteFile(fullPath, []byte(payload.Content), 0644); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		if workspaceObserver != nil {
+			workspaceObserver.Emit("modified", w, fullPath)
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
@@ -3212,14 +3279,11 @@ func spawnSubagent(prompt, agentType string) (string, <-chan string, error) {
 
 	var sessionRepo *storage.Repository
 	if workspace != "" {
-		dbPath := filepath.Join(workspace, ".agent", "sessions.db")
-		d, err := storage.NewDatabase(dbPath)
-		if err == nil {
-			sessionRepo = storage.NewRepository(d)
-		}
+		sessionRepo, _ = getWorkspaceRepo(workspace)
 	}
 	if sessionRepo == nil {
-		sessionRepo = repo
+		log.Printf("Failed to get workspace repo for subagent")
+		return "", nil, fmt.Errorf("failed to get workspace repo")
 	}
 
 	cfgDict := configToDict(appCfg)
@@ -3246,11 +3310,6 @@ func spawnSubagent(prompt, agentType string) (string, <-chan string, error) {
 	doneChan := make(chan string, 1)
 
 	go func() {
-		defer func() {
-			if sessionRepo != nil && sessionRepo != repo {
-				sessionRepo.Close()
-			}
-		}()
 		ctx, cancel := context.WithCancel(context.Background())
 		bgProcessesMu.Lock()
 		bgProcesses[newSessionID] = cancel
@@ -3881,15 +3940,11 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 
 	var sessionRepo *storage.Repository
 	if workspace != "" {
-		dbPath := filepath.Join(workspace, ".agent", "sessions.db")
-		os.MkdirAll(filepath.Join(workspace, ".agent"), 0755)
-		d, err := storage.NewDatabase(dbPath)
-		if err == nil {
-			sessionRepo = storage.NewRepository(d)
-		}
+		sessionRepo, _ = getWorkspaceRepo(workspace)
 	}
 	if sessionRepo == nil {
-		sessionRepo = repo
+		log.Printf("Failed to get workspace repo in runEngine")
+		return
 	}
 
 	if workspace != "" {
@@ -4700,6 +4755,17 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		createGitSnapshot(workspace, postSnapHash)
 		workspaceChanges = createArtifacts(workspace, snapHash, postSnapHash, agentModifiedFiles, revertedFiles)
 		debugLog("runEngine: workspace changes: %+v", workspaceChanges)
+		if workspaceObserver != nil {
+			for _, f := range workspaceChanges["created"].([]string) {
+				workspaceObserver.Emit("created", workspace, f)
+			}
+			for _, f := range workspaceChanges["modified"].([]string) {
+				workspaceObserver.Emit("modified", workspace, f)
+			}
+			for _, f := range workspaceChanges["deleted"].([]string) {
+				workspaceObserver.Emit("deleted", workspace, f)
+			}
+		}
 	}
 
 	elapsedMs := time.Since(startTime).Milliseconds()
@@ -4944,9 +5010,15 @@ func createArtifacts(workspace, preSnapHash, postSnapHash string, agentModifiedF
 	}
 
 	// Ensure slices aren't nil
-	if created == nil { created = []string{} }
-	if modified == nil { modified = []string{} }
-	if deleted == nil { deleted = []string{} }
+	if created == nil {
+		created = []string{}
+	}
+	if modified == nil {
+		modified = []string{}
+	}
+	if deleted == nil {
+		deleted = []string{}
+	}
 
 	// Calculate line additions/deletions using git diff --numstat
 	stats := make(map[string]map[string]int)
@@ -4956,7 +5028,7 @@ func createArtifacts(workspace, preSnapHash, postSnapHash string, agentModifiedF
 	if err != nil {
 		debugLog("createArtifacts: numstat failed: %v", err)
 	}
-	
+
 	for _, line := range strings.Split(string(numstatOut), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {

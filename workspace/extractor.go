@@ -19,6 +19,8 @@ func ExtractFacts(workspace, path string, data []byte, tree *sitter.Tree) ([]sto
 
 	var activeScopes []string
 	seenEdges := make(map[string]bool)
+	symCounter := 0
+	edgeCounter := 0
 
 	getCallTarget := func(n *sitter.Node) string {
 		if n == nil {
@@ -79,7 +81,8 @@ func ExtractFacts(workspace, path string, data []byte, tree *sitter.Tree) ([]sto
 						symType = "method"
 					}
 
-					id := fmt.Sprintf("sym-%s-%s-%d", path, name, node.StartPoint().Row)
+					symCounter++
+					id := fmt.Sprintf("sym-%s-%d-%d", path, name, symCounter)
 					symbols = append(symbols, storage.WorkspaceSymbolRow{
 						ID: id, Workspace: workspace, Path: path, Name: name, Type: symType,
 						LineStart: int(node.StartPoint().Row) + 1, LineEnd: int(node.EndPoint().Row) + 1,
@@ -105,7 +108,8 @@ func ExtractFacts(workspace, path string, data []byte, tree *sitter.Tree) ([]sto
 						edgeKey := fmt.Sprintf("import:%s:%s", path, target)
 						if !seenEdges[edgeKey] {
 							seenEdges[edgeKey] = true
-							id := fmt.Sprintf("edge-imp-%s-%d", target, node.StartPoint().Row)
+							edgeCounter++
+							id := fmt.Sprintf("edge-imp-%s-%d", path, edgeCounter)
 							edges = append(edges, storage.WorkspaceEdgeRow{
 								ID: id, Workspace: workspace, SourcePath: path, TargetPath: target, EdgeType: "import",
 							})
@@ -124,12 +128,13 @@ func ExtractFacts(workspace, path string, data []byte, tree *sitter.Tree) ([]sto
 				edgeKey := fmt.Sprintf("calls:%s:%s", source, target)
 				if !seenEdges[edgeKey] {
 					seenEdges[edgeKey] = true
+					edgeCounter++
 					edges = append(edges, storage.WorkspaceEdgeRow{
-						ID:         fmt.Sprintf("edge-call-%s-%s-%d", source, target, node.StartPoint().Row),
+						ID:         fmt.Sprintf("edge-call-%s-%d", path, edgeCounter),
 						Workspace:  workspace,
-						SourcePath: source,
+						SourcePath: path,
 						TargetPath: target,
-						EdgeType:   "calls",
+						EdgeType:   "calls:" + source,
 					})
 				}
 			}
@@ -154,8 +159,9 @@ func ExtractFacts(workspace, path string, data []byte, tree *sitter.Tree) ([]sto
 				edgeKey := fmt.Sprintf("refs:%s:%s", path, target)
 				if !seenEdges[edgeKey] {
 					seenEdges[edgeKey] = true
+					edgeCounter++
 					edges = append(edges, storage.WorkspaceEdgeRow{
-						ID:         fmt.Sprintf("edge-ref-%s-%d", target, node.StartPoint().Row),
+						ID:         fmt.Sprintf("edge-ref-%s-%d", path, edgeCounter),
 						Workspace:  workspace,
 						SourcePath: path,
 						TargetPath: target,

@@ -8,20 +8,12 @@ venv/
 .DS_Store
 
 # QuietForge local files
-make_icon.py
 quietforge.exe
 quietforge.exe~
-quietforge
-quietforge.db*
 quietforge_projects.json
 rsrc_windows_*
 server.crt
 server.key
 .quietforge/
-runModel.bat
-mmproj-Qwythos*
-Qwythos*
-qwythos_template.jinja
 test.exe
-Modelfile
 master_design/
