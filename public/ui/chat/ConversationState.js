@@ -142,7 +142,7 @@ class ConversationState {
       // Suppress IntersectionObserver while setting initial scroll position
       this._suppressLazyObserver = true;
       await renderChat();
-      scrollChatToBottom(true);
+      await scrollChatToBottom(true);
       this._suppressLazyObserver = false;
 
       // Register lazy observer for off-screen turns after viewport is at bottom

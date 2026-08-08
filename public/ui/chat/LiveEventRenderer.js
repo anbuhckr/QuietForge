@@ -1,6 +1,6 @@
 import { conversationState } from './ConversationState.js?v=1785573007908';
 import { renderChat } from './ChatRenderer.js?v=1785573007908';
-let _lastStreamRender = 0;
+let _streamRenderQueued = false;
 
 export function formatToolCall(rawStr) {
   const spaceIdx = rawStr.indexOf(' ');
@@ -147,10 +147,12 @@ export async function addLiveEvent(evt) {
   }
 
   if (kind === 'token' || kind === 'think') {
-    const now = Date.now();
-    if (!_lastStreamRender || (now - _lastStreamRender) >= 100) {
-      _lastStreamRender = now;
-      requestAnimationFrame(() => renderChat());
+    if (!_streamRenderQueued) {
+      _streamRenderQueued = true;
+      requestAnimationFrame(() => {
+        _streamRenderQueued = false;
+        renderChat();
+      });
     }
     return;
   }

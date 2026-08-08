@@ -552,11 +552,16 @@ export async function sseOnError() {
   }, 2000);
 }
 
+let _lastTokenDisplayStr = '';
 export function updateTokenDisplay() {
   const p = state.totalTokens.prompt || 0;
   const c = state.totalTokens.completion || 0;
   const costIn = (p / 1_000_000) * (state.inputPricePerM || 0);
   const costOut = (c / 1_000_000) * (state.outputPricePerM || 0);
-  const el = document.getElementById('tokenDisplay');
-  if (el) el.textContent = '▲ ' + fmtTokens(p) + ' (' + fmtCost(costIn) + ') ▼ ' + fmtTokens(c) + ' (' + fmtCost(costOut) + ')';
+  const newStr = '▲ ' + fmtTokens(p) + ' (' + fmtCost(costIn) + ') ▼ ' + fmtTokens(c) + ' (' + fmtCost(costOut) + ')';
+  if (newStr !== _lastTokenDisplayStr) {
+    const el = document.getElementById('tokenDisplay');
+    if (el) el.textContent = newStr;
+    _lastTokenDisplayStr = newStr;
+  }
 }

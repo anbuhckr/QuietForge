@@ -1,9 +1,21 @@
+const _tokenCache = new Map();
 export function fmtTokens(n) {
-  return (n || 0).toLocaleString();
+  if (!n) return '0';
+  if (_tokenCache.has(n)) return _tokenCache.get(n);
+  const res = String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  _tokenCache.set(n, res);
+  return res;
 }
 
+const _costCache = new Map();
 export function fmtCost(cents) {
-  return '$' + (cents || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (_costCache.has(cents)) return _costCache.get(cents);
+  const val = cents || 0;
+  const dollars = Math.floor(val / 100);
+  const frac = Math.round(val % 100).toString().padStart(2, '0');
+  const res = '$' + String(dollars).replace(/\B(?=(\d{3})+(?!\d))/g, ",") + '.' + frac;
+  _costCache.set(cents, res);
+  return res;
 }
 
 export function timeAgo(dateString) {

@@ -1,4 +1,4 @@
-import { esc, md, scrollChatToBottom, chatIsNearBottom } from '../../utils/dom.js?v=1785573007908';
+import { esc, md, mdAsync, scrollChatToBottom, chatIsNearBottom } from '../../utils/dom.js?v=1785573007908';
 import { conversationState } from './ConversationState.js?v=1785573007908';
 import { formatRunDuration } from '../../utils/formatters.js?v=1785573007908';
 import { updateTokenDisplay } from '../../core/engine.js?v=1785573007908';
@@ -13,20 +13,31 @@ export function ensureLazyObserver() {
   if (_lazyObserver) return;
   _lazyObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
+      const el = entry.target;
+      const idx = parseInt(el.dataset.turnIdx, 10);
+      if (isNaN(idx) || idx >= conversationState.turns.length) continue;
+      const turn = conversationState.turns[idx];
+      
       if (entry.isIntersecting) {
-        const el = entry.target;
-        const idx = parseInt(el.dataset.turnIdx, 10);
-        if (isNaN(idx) || idx >= conversationState.turns.length) continue;
-        if (el.dataset.renderedFinal === "true") continue;
-        const turn = conversationState.turns[idx];
-        renderTurn(el, turn);
-        if (turn.completed) {
-          el.dataset.renderedFinal = "true";
+        if (el.dataset.renderedFinal !== "true") {
+          el.style.minHeight = '';
+          renderTurn(el, turn).then(() => {
+            if (turn.completed) el.dataset.renderedFinal = "true";
+          });
         }
-        _lazyObserver.unobserve(el);
+      } else {
+        const immediateStart = Math.max(0, conversationState.turns.length - 3);
+        if (idx < immediateStart && turn.completed && el.dataset.renderedFinal === "true") {
+          const h = entry.boundingClientRect.height;
+          if (h > 0) el.style.minHeight = h + 'px';
+          el.innerHTML = '';
+          const duration = formatRunDuration(turn.durationMs || 0);
+          el.innerHTML = `<div class="msg agent" style="height: 100%; display: flex; align-items: center; justify-content: center;"><div class="bubble markdown-body" style="opacity:0.5;font-style:italic;">Worked for ${esc(duration)} — scroll to load</div></div>`;
+          el.dataset.renderedFinal = "false";
+        }
       }
     }
-  }, { root: document.getElementById('chat'), rootMargin: '200px 0px' });
+  }, { root: document.getElementById('chat'), rootMargin: '400px 0px' });
 }
 
 export async function renderTurn(turnGroup, turn) {
@@ -54,14 +65,22 @@ export async function renderTurn(turnGroup, turn) {
 
         let cleanedUser = (turn.user || '').trim();
 
-        let content = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(cleanedUser)) : esc(cleanedUser);
-        content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
-        content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
-          return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
-        });
-        d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body">${content}</div>`;
+        d.innerHTML = `<div class="label">User</div><div class="bubble markdown-body" style="white-space: pre-wrap;">${esc(cleanedUser)}</div>`;
         turnGroup.appendChild(d);
         window.lastUserMsg = d; // update global pointer
+
+        mdAsync(cleanedUser).then(html => {
+          let content = html;
+          content = content.replace(/(^|\s)(\/[a-zA-Z0-9_-]+)/g, '$1<span class="hl-slash">$2</span>');
+          content = content.replace(/(^|\s)(@[a-zA-Z0-9_.-]+\/?)/g, (match, space, tag) => {
+            return space + `<span class="${tag.endsWith('/') ? 'hl-folder' : 'hl-mention'}">${tag}</span>`;
+          });
+          const bubble = d.querySelector('.bubble');
+          if (bubble) {
+            bubble.style.whiteSpace = '';
+            bubble.innerHTML = content;
+          }
+        });
       }
 
       if (turn.snapshot && turn.messageId && !d.querySelector('.revert-btn')) {
@@ -165,8 +184,20 @@ export async function renderTurn(turnGroup, turn) {
       delete turn._needsFullRender;
     }
 
+    if (!log.dataset.scrollAttached) {
+      log.dataset.scrollAttached = "true";
+      log.addEventListener('scroll', () => {
+        if (log._scrollRaf) return;
+        log._scrollRaf = requestAnimationFrame(() => {
+          log.dataset.userScrolledUp = (log.scrollHeight - log.scrollTop - log.clientHeight) >= 10 ? "true" : "false";
+          log._scrollRaf = null;
+        });
+      }, { passive: true });
+    }
+
     const renderedCount = parseInt(log.dataset.count || "0", 10);
-    const isScrolledToBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 10;
+    const isScrolledToBottom = log.dataset.userScrolledUp !== "true";
+    let needsScroll = false;
 
     if (turn.liveContainer.length > renderedCount) {
       for (let i = renderedCount; i < turn.liveContainer.length; i++) {
@@ -177,9 +208,13 @@ export async function renderTurn(turnGroup, turn) {
           entry.dataset.thinkIdx = i;
           entry.dataset.len = block.think.length;
           if (turn.completed) {
-            let html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
-            if (!html.trim()) html = esc(block.think);
-            entry.innerHTML = html;
+            entry.style.whiteSpace = 'pre-wrap';
+            entry.textContent = block.think;
+            mdAsync(block.think).then(html => {
+               if (!html.trim()) html = esc(block.think);
+               entry.style.whiteSpace = '';
+               entry.innerHTML = html;
+            });
           } else {
             entry.style.whiteSpace = 'pre-wrap';
             entry.textContent = block.think;
@@ -203,7 +238,7 @@ export async function renderTurn(turnGroup, turn) {
       }
       log.dataset.count = turn.liveContainer.length;
       if (isScrolledToBottom || renderedCount === 0) {
-        log.scrollTop = log.scrollHeight;
+        needsScroll = true;
       }
     }
     if (turn.liveContainer.length > 0 && renderedCount > 0) {
@@ -216,13 +251,20 @@ export async function renderTurn(turnGroup, turn) {
             const currentLen = parseInt(thinkNode.dataset.len || "0", 10);
             if (block.think.length > currentLen) {
               if (turn.completed) {
-                thinkNode.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(block.think)) : esc(block.think);
+                thinkNode.style.whiteSpace = 'pre-wrap';
+                thinkNode.textContent = block.think;
+                mdAsync(block.think).then(html => {
+                   if (!html.trim()) html = esc(block.think);
+                   thinkNode.style.whiteSpace = '';
+                   thinkNode.innerHTML = html;
+                });
               } else {
+                thinkNode.style.whiteSpace = 'pre-wrap';
                 thinkNode.textContent = block.think;
               }
               thinkNode.dataset.len = block.think.length;
               if (isScrolledToBottom) {
-                log.scrollTop = log.scrollHeight;
+                needsScroll = true;
               }
             }
           }
@@ -244,11 +286,16 @@ export async function renderTurn(turnGroup, turn) {
             }
             log.dataset[toolKey] = block.tools.length;
             if (isScrolledToBottom) {
-              log.scrollTop = log.scrollHeight;
+              needsScroll = true;
             }
           }
         }
       }
+    }
+    if (needsScroll) {
+      requestAnimationFrame(() => {
+        log.scrollTop = 9999999;
+      });
     }
   } else {
     let wrapper = turnGroup.querySelector('.live-container');
@@ -314,25 +361,23 @@ export async function renderTurn(turnGroup, turn) {
     const bubble = d.querySelector('.bubble');
     if (bubble && bubble.dataset.contentKey !== contentKey) {
       if (turn.completed) {
-        if (content.length > 5000) {
-          bubble.style.whiteSpace = 'pre-wrap';
-          bubble.textContent = content;
-          setTimeout(() => {
-            if (window.marked) bubble.innerHTML = md(content);
-            else bubble.innerHTML = esc(content);
-          }, 0);
-        } else {
-          if (window.marked) {
-            bubble.innerHTML = md(content);
-          } else {
-            bubble.innerHTML = esc(content);
-          }
-        }
+        bubble.dataset.contentKey = contentKey;
+        // Inject raw text immediately to secure layout bounds and improve LCP
+        bubble.style.whiteSpace = 'pre-wrap';
+        bubble.textContent = content;
+        
+        // Upgrade to parsed HTML asynchronously to avoid blocking main thread
+        mdAsync(content).then(html => {
+          requestAnimationFrame(() => {
+            bubble.style.whiteSpace = '';
+            bubble.innerHTML = html;
+          });
+        });
       } else {
         bubble.style.whiteSpace = 'pre-wrap';
         bubble.textContent = content;
+        bubble.dataset.contentKey = contentKey;
       }
-      bubble.dataset.contentKey = contentKey;
     }
 
     // Render any UI widgets for changed files
@@ -353,8 +398,7 @@ export async function renderTurn(turnGroup, turn) {
   updateTokenDisplay();
 }
 
-export async function doRender() {
-  const shouldFollow = chatIsNearBottom();
+export async function doRender(shouldFollow) {
   const chat = document.getElementById('chat');
 
   if (conversationState.turns.length === 0) {
@@ -400,8 +444,9 @@ export async function doRender() {
     }
 
     // Deferred lazy rendering for old completed turns not yet in DOM
-    if (i < immediateStart && turn.completed && turnGroup.children.length === 0) {
-      // Create lightweight placeholder, render on scroll via IntersectionObserver
+    if (i < immediateStart && turn.completed && turnGroup.dataset.renderedFinal !== "true") {
+      if (turnGroup.children.length === 0) {
+        // Create lightweight placeholder, render on scroll via IntersectionObserver
       const placeholder = document.createElement('div');
       placeholder.className = 'msg agent';
       placeholder.style.minHeight = '48px';
@@ -415,6 +460,7 @@ export async function doRender() {
       const duration = formatRunDuration(turn.durationMs || 0);
       placeholder.innerHTML = `<div class="bubble markdown-body" style="opacity:0.5;font-style:italic;">Worked for ${esc(duration)} — scroll to load</div>`;
       turnGroup.appendChild(placeholder);
+      }
       if (!_suppressLazyObserver) {
         _lazyObserver.observe(turnGroup);
       }
@@ -429,7 +475,6 @@ export async function doRender() {
     }
   }
 
-  if (shouldFollow) scrollChatToBottom();
   conversationState.updateTimer();
 }
 
@@ -441,12 +486,20 @@ export async function renderChat() {
   _isRendering = true;
 
   try {
-    do {
-      _needsReRender = false;
-      await doRender();
-    } while (_needsReRender);
+    _needsReRender = false;
+    await doRender(false); // Skip synchronous scrolling
+    
+    requestAnimationFrame(() => {
+      if (chatIsNearBottom()) {
+        scrollChatToBottom();
+      }
+    });
   } finally {
     _isRendering = false;
+    if (_needsReRender) {
+      _needsReRender = false;
+      requestAnimationFrame(renderChat);
+    }
   }
 }
 

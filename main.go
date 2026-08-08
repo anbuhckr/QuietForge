@@ -39,6 +39,7 @@ import (
 	"github.com/sashabaranov/go-openai"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 )
@@ -853,7 +854,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v2.0.3")
+		fmt.Println("QuietForge v2.0.4")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -937,12 +938,16 @@ func main() {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
+	app.Use(compress.New(compress.Config{
+		Level: compress.LevelBestSpeed,
+	}))
 	app.Use(cors.New())
 	app.Use(authMiddleware)
 	app.Use("/public", filesystem.New(filesystem.Config{
 		Root:       http.FS(publicFiles),
 		PathPrefix: "public",
 		Browse:     false,
+		MaxAge:     3600 * 24 * 30,
 	}))
 
 	app.Get("/", func(c *fiber.Ctx) error {
@@ -1391,15 +1396,8 @@ func setupHealthRoutes(api fiber.Router) {
 				projects[i] = p
 			}
 			resp["projects"] = projects
-			resp["session_log"] = getSessionLog()
 			resp["display_log"] = getDisplayLog()
-			eventsMu.Lock()
-			eventsCopy := make([]map[string]any, len(liveEvents))
-			copy(eventsCopy, liveEvents)
-			eventsMu.Unlock()
-			resp["live_events"] = eventsCopy
 			resp["artifacts"] = getArtifactsForUI(activePath)
-			resp["events"] = eventsCopy
 		}
 
 		return c.JSON(resp)
@@ -4139,7 +4137,6 @@ func runEngine(ctx context.Context, message, agentID, systemPrompt string) {
 		}
 
 		isThinkModel := strings.Contains(strings.ToLower(mName), "qwythos") || strings.Contains(strings.ToLower(mName), "deepseek") || strings.Contains(strings.ToLower(mName), "r1")
-
 
 		if i == 0 {
 			originalCtxWindow = ctxWindow
