@@ -285,6 +285,9 @@ func parseConfig(data map[string]any) Config {
 		if enabled, ok := embedRaw["enabled"].(bool); ok {
 			ec.Enabled = enabled
 		}
+		if disableRetrieval, ok := embedRaw["disable_retrieval"].(bool); ok {
+			ec.DisableRetrieval = disableRetrieval
+		}
 		if model, ok := embedRaw["model"].(string); ok && model != "" {
 			ec.Model = &model
 		}
@@ -457,6 +460,7 @@ func configToDict(cfg Config) map[string]any {
 	if cfg.Embedding != nil {
 		embedMap := make(map[string]any)
 		embedMap["enabled"] = cfg.Embedding.Enabled
+		embedMap["disable_retrieval"] = cfg.Embedding.DisableRetrieval
 		if cfg.Embedding.Model != nil {
 			embedMap["model"] = *cfg.Embedding.Model
 		}

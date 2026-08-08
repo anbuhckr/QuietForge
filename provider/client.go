@@ -111,12 +111,32 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 		if instance.DisableVision {
 			req.Messages = stripVision(copyMessages(messages))
 		} else {
-			req.Messages = messages
+			req.Messages = copyMessages(messages)
+		}
+
+		// Pad ReasoningContent for thinking models to prevent strict API nodes from throwing 400 Bad Request
+		// if the model jumped straight to a tool call without emitting a reasoning block, or if the user
+		// switched from a non-thinking model mid-conversation.
+		modelLower := strings.ToLower(req.Model)
+		if strings.Contains(modelLower, "reason") || strings.Contains(modelLower, "think") || strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "r1") || strings.Contains(modelLower, "qwythos") {
+			for idx := range req.Messages {
+				if req.Messages[idx].Role == "assistant" && req.Messages[idx].ReasoningContent == "" {
+					req.Messages[idx].ReasoningContent = " "
+				}
+			}
 		}
 
 		maxTokensReduced := false
 		var err error
 		for retries := 0; ; retries++ {
+			if Debug {
+				for didx, dm := range req.Messages {
+					if dm.Role == "assistant" {
+						log.Printf("[DEBUG] %s pre-call msg[%d] role=%s reasoning_content_len=%d content_len=%d tool_calls=%d",
+							label, didx, dm.Role, len(dm.ReasoningContent), len(dm.Content), len(dm.ToolCalls))
+					}
+				}
+			}
 			result, callErr := callFn(instance, *req)
 			if callErr == nil {
 				c.mu.Lock()
@@ -208,6 +228,15 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 			msg := fmt.Sprintf("%s transient error: %v, retrying in 3 seconds (Attempt %d)", label, err, retries+1)
 			if Debug {
 				log.Printf("[DEBUG] %s", msg)
+			}
+			// Always log reasoning_content diagnostics when this specific error occurs
+			if strings.Contains(errStr, "reasoning_content") {
+				for didx, dm := range req.Messages {
+					if dm.Role == "assistant" {
+						log.Printf("[REASONING_DIAG] msg[%d] role=assistant reasoning_len=%d content_len=%d content_preview=%.30s toolcalls=%d",
+							didx, len(dm.ReasoningContent), len(dm.Content), dm.Content, len(dm.ToolCalls))
+					}
+				}
 			}
 			if c.OnEvent != nil {
 				c.OnEvent(msg)

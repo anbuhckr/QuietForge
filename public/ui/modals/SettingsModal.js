@@ -262,11 +262,13 @@ export async function openEmbeddingSettings() {
     const data = await res.json();
     if (data.embedding) {
       $('cfgEmbeddingEnabled').checked = !!data.embedding.enabled;
+      $('cfgEmbeddingDisableRetrieval').checked = !!data.embedding.disable_retrieval;
       $('cfgEmbeddingBaseURL').value = data.embedding.base_url || '';
       $('cfgEmbeddingModel').value = data.embedding.model || '';
       $('cfgEmbeddingAPIKey').value = data.embedding.api_key || '';
     } else {
       $('cfgEmbeddingEnabled').checked = false;
+      $('cfgEmbeddingDisableRetrieval').checked = false;
       $('cfgEmbeddingBaseURL').value = '';
       $('cfgEmbeddingModel').value = '';
       $('cfgEmbeddingAPIKey').value = '';

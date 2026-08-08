@@ -854,7 +854,7 @@ func main() {
 	flag.Parse()
 
 	if versionFlag {
-		fmt.Println("QuietForge v2.0.4")
+		fmt.Println("QuietForge v2.0.5")
 		os.Exit(0)
 	}
 	provider.Debug = debugMode
@@ -2330,10 +2330,11 @@ func setupConfigRoutes(api fiber.Router) {
 		}
 
 		rawCfg["embedding"] = map[string]any{
-			"enabled":  payload.Enabled,
-			"base_url": payload.BaseURL,
-			"model":    payload.Model,
-			"api_key":  payload.APIKey,
+			"enabled":           payload.Enabled,
+			"disable_retrieval": payload.DisableRetrieval,
+			"base_url":          payload.BaseURL,
+			"model":             payload.Model,
+			"api_key":           payload.APIKey,
 		}
 
 		saveRawConfig(rawCfg)

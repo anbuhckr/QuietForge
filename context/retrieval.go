@@ -2,9 +2,11 @@ package context
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 
 	"quietforge/config"
 	
@@ -75,42 +77,13 @@ func (p *RetrievalProvider) Gather(req ContextRequest) ([]ContextFragment, error
 	var fragments []ContextFragment
 	seen := make(map[string]bool)
 
-	lowerPrompt := strings.ToLower(req.Prompt)
-
-	// 1. BM25 / Substring Search (Fast, exact matches)
-	symRows, err := repo.DB.Conn.Query("SELECT id, name, type, path, line_start, line_end FROM workspace_symbols WHERE workspace = ?", req.Workspace)
-	if err == nil {
-		for symRows.Next() {
-			var id, name, typ, path string
-			var lineStart, lineEnd int
-			symRows.Scan(&id, &name, &typ, &path, &lineStart, &lineEnd)
-
-			if len(name) > 3 && strings.Contains(lowerPrompt, strings.ToLower(name)) {
-				fragID := fmt.Sprintf("sym:%s", id)
-				seen[fragID] = true
-				codeBody := readSymbolCode(req.Workspace, path, lineStart, lineEnd)
-				fragments = append(fragments, ContextFragment{
-					ProviderID: p.ID(),
-					ID:         fragID,
-					Priority:   70.0,
-					Confidence: 0.8,
-					TokenCost:  15,
-					Data: map[string]any{
-						"symbol": name,
-						"type":   typ,
-						"file":   path,
-						"match":  "bm25",
-						"code":   codeBody,
-					},
-				})
-			}
-		}
-		symRows.Close()
+	cfg := config.LoadConfig(".")
+	if cfg.Embedding != nil && cfg.Embedding.DisableRetrieval {
+		return fragments, nil
 	}
 
-	// 2. Vector Search (Semantic)
-	cfg := config.LoadConfig(".")
 	if cfg.Embedding != nil && cfg.Embedding.Enabled {
+		// 1. Vector Search (Semantic)
 		queryVector, err := workspace.GenerateSingleEmbedding(req.Prompt, cfg.Embedding)
 		if err == nil && len(queryVector) > 0 {
 			records := workspace.GetWorkspaceEmbeddings(req.Workspace)
@@ -158,7 +131,6 @@ func (p *RetrievalProvider) Gather(req ContextRequest) ([]ContextFragment, error
 
 				if filePath != "" {
 					var symID string
-					var lineStart, lineEnd int
 					row := repo.DB.Conn.QueryRow("SELECT id, line_start, line_end FROM workspace_symbols WHERE workspace = ? AND path = ? AND name = ?", req.Workspace, filePath, symbolName)
 					if err := row.Scan(&symID, &lineStart, &lineEnd); err == nil {
 						fragID = fmt.Sprintf("sym:%s", symID)
@@ -187,7 +159,68 @@ func (p *RetrievalProvider) Gather(req ContextRequest) ([]ContextFragment, error
 				})
 			}
 		}
+	} else {
+		// 2. BM25 / FTS5 Search (Fast, exact matches natively in SQLite)
+		ftsQuery := buildFTSQuery(req.Prompt)
+		if ftsQuery != "" {
+			symRows, err := repo.DB.Conn.Query(`
+				SELECT ws.id, ws.name, ws.type, ws.path, ws.line_start, ws.line_end
+				FROM workspace_fts fts
+				JOIN workspace_symbols ws ON fts.id = ws.id
+				WHERE fts.workspace = ? AND fts.name MATCH ?
+				ORDER BY fts.rank
+				LIMIT 3
+			`, req.Workspace, ftsQuery)
+			
+			if err == nil {
+				for symRows.Next() {
+					var id, name, typ, path string
+					var lineStart, lineEnd int
+					symRows.Scan(&id, &name, &typ, &path, &lineStart, &lineEnd)
+
+					fragID := fmt.Sprintf("sym:%s", id)
+					if seen[fragID] {
+						continue
+					}
+					seen[fragID] = true
+					codeBody := readSymbolCode(req.Workspace, path, lineStart, lineEnd)
+					fragments = append(fragments, ContextFragment{
+						ProviderID: p.ID(),
+						ID:         fragID,
+						Priority:   70.0,
+						Confidence: 0.8,
+						TokenCost:  15,
+						Data: map[string]any{
+							"symbol": name,
+							"type":   typ,
+							"file":   path,
+							"match":  "bm25",
+							"code":   codeBody,
+						},
+					})
+				}
+				symRows.Close()
+			} else {
+				log.Printf("BM25 FTS5 Query failed: %v", err)
+			}
+		}
 	}
 
 	return fragments, nil
+}
+
+func buildFTSQuery(prompt string) string {
+	var tokens []string
+	words := strings.FieldsFunc(prompt, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	for _, w := range words {
+		if len(w) > 3 { // skip small words
+			tokens = append(tokens, w)
+		}
+	}
+	if len(tokens) == 0 {
+		return ""
+	}
+	return strings.Join(tokens, " OR ")
 }

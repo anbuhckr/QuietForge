@@ -20,11 +20,15 @@ const mdResolvers = new Map();
 
 function initWorker() {
   if (!mdWorker) {
-    mdWorker = new Worker('/public/worker.js');
+    mdWorker = new Worker('/public/worker.js?v=3');
     mdWorker.onmessage = function(e) {
       const { id, html } = e.data;
       if (mdResolvers.has(id)) {
-        mdResolvers.get(id)(html);
+        let safeHtml = html;
+        if (window.DOMPurify) {
+          safeHtml = DOMPurify.sanitize(html);
+        }
+        mdResolvers.get(id)(safeHtml);
         mdResolvers.delete(id);
       }
     };

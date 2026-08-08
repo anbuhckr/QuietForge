@@ -666,6 +666,7 @@ $('embeddingClose').onclick = () => $('embeddingModal').classList.remove('open')
 $('embeddingSave').onclick = async () => {
   const payload = {
     enabled: $('cfgEmbeddingEnabled').checked,
+    disable_retrieval: $('cfgEmbeddingDisableRetrieval').checked,
     base_url: $('cfgEmbeddingBaseURL').value,
     model: $('cfgEmbeddingModel').value,
     api_key: $('cfgEmbeddingAPIKey').value

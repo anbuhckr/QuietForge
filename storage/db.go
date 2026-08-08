@@ -129,6 +129,12 @@ func (d *Database) Migrate() error {
 			updated_at INTEGER NOT NULL,
 			FOREIGN KEY (workspace, path) REFERENCES workspace_files_v2(workspace, path) ON DELETE CASCADE
 		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS workspace_fts USING fts5(
+			id UNINDEXED, 
+			workspace UNINDEXED, 
+			name, 
+			tokenize='porter'
+		)`,
 		`CREATE TABLE IF NOT EXISTS workspace_edges (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,

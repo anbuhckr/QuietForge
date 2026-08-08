@@ -414,7 +414,13 @@ func (r *Repository) UpsertWorkspaceFile(file WorkspaceFileRow) error {
 }
 
 func (r *Repository) UpsertWorkspaceSymbol(sym WorkspaceSymbolRow) error {
-	_, err := r.DB.Conn.Exec(`
+	tx, err := r.DB.Conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
 		INSERT INTO workspace_symbols (id, workspace, path, name, type, line_start, line_end, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -424,12 +430,51 @@ func (r *Repository) UpsertWorkspaceSymbol(sym WorkspaceSymbolRow) error {
 			line_end = excluded.line_end,
 			updated_at = excluded.updated_at
 	`, sym.ID, sym.Workspace, sym.Path, sym.Name, sym.Type, sym.LineStart, sym.LineEnd, sym.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Keep FTS sync'd natively. SQLite FTS5 doesn't support ON CONFLICT(id) DO UPDATE easily if id is UNINDEXED
+	// The safest approach is DELETE then INSERT, or use REPLACE if id is unique in another way, but FTS5 doesn't enforce UNIQUE constraints.
+	// We'll DELETE the row by id first, then INSERT.
+	_, err = tx.Exec(`DELETE FROM workspace_fts WHERE id = ?`, sym.ID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
+		INSERT INTO workspace_fts (id, workspace, name)
+		VALUES (?, ?, ?)
+	`, sym.ID, sym.Workspace, sym.Name)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (r *Repository) DeleteWorkspaceSymbolsByPath(workspace, path string) error {
-	_, err := r.DB.Conn.Exec("DELETE FROM workspace_symbols WHERE workspace = ? AND path = ?", workspace, path)
-	return err
+	tx, err := r.DB.Conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
+		DELETE FROM workspace_fts 
+		WHERE id IN (
+			SELECT id FROM workspace_symbols WHERE workspace = ? AND path = ?
+		)
+	`, workspace, path)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec("DELETE FROM workspace_symbols WHERE workspace = ? AND path = ?", workspace, path)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (r *Repository) ListWorkspaceSymbols(workspace string) ([]WorkspaceSymbolRow, error) {

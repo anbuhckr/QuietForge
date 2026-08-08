@@ -105,17 +105,39 @@ func ToOpenAIMessages(messages []Message, disableVision bool) []openai.ChatCompl
 
 		content := strings.Join(textParts, "")
 		
-		// Strip think tags from history so models don't repeat their own thoughts
+		reasoningMatch := regexp.MustCompile(`(?is)<(?:think|thought)>(.*?)<\/(?:think|thought)>`).FindStringSubmatch(content)
+		reasoningContent := ""
+		if len(reasoningMatch) > 1 {
+			reasoningContent = strings.TrimSpace(reasoningMatch[1])
+		} else {
+			// Check for unclosed tag which can happen if the stream was interrupted or model jumped to tool call
+			unclosedMatch := regexp.MustCompile(`(?is)<(?:think|thought)>(.*)`).FindStringSubmatch(content)
+			if len(unclosedMatch) > 1 {
+				reasoningContent = strings.TrimSpace(unclosedMatch[1])
+			}
+		}
+
+		// Strip think tags from history so they can be placed natively in ReasoningContent
 		content = regexp.MustCompile(`(?is)<\/?(?:think|thought)>.*?<\/?(?:think|thought)>`).ReplaceAllString(content, "")
 		// Handle any remaining unclosed tags just in case
 		content = regexp.MustCompile(`(?is)<(?:think|thought)>.*`).ReplaceAllString(content, "")
 		content = strings.TrimSpace(content)
+
+		// go-openai uses `json:"content,omitempty"`. If we leave this empty, the entire field is omitted.
+		// DeepSeek strictly requires `content` to be present (even if empty) when `reasoning_content` is passed.
+		// We use a single space to prevent omission while remaining visually empty.
+		if content == "" {
+			content = " "
+		}
 
 		switch role {
 		case "assistant":
 			entry := openai.ChatCompletionMessage{
 				Role:    "assistant",
 				Content: content,
+			}
+			if reasoningContent != "" {
+				entry.ReasoningContent = reasoningContent
 			}
 
 			if len(toolCalls) > 0 {
