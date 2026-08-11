@@ -163,6 +163,15 @@ func (c *Client) tryEachProvider(ctx context.Context, req *openai.ChatCompletion
 						newClients = append(newClients, c.clients[targetIdx])
 						newClients = append(newClients, c.clients[:targetIdx]...)
 						newClients = append(newClients, c.clients[targetIdx+1:]...)
+						
+						for j := range newClients {
+							if j == 0 {
+								newClients[j].ID = "primary"
+							} else {
+								newClients[j].ID = fmt.Sprintf("fallback_%d", j)
+							}
+						}
+						
 						c.clients = newClients
 					}
 				}
